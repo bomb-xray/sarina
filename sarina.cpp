@@ -1456,7 +1456,13 @@ static void http_server(int port) {
     sockaddr_in a{}; a.sin_family = AF_INET;
     a.sin_addr.s_addr = htonl(INADDR_ANY);          // 0.0.0.0
     a.sin_port = htons((u16)port);
-    if (bind(srv, (sockaddr*)&a, sizeof a) < 0) { perror("bind"); return; }
+    if (bind(srv, (sockaddr*)&a, (socklen_t)sizeof a) != 0) {
+        fprintf(stderr, "\n  [!] پورت %d اشغال است. با --port عدد دیگری بدهید.\n", port);
+        fflush(stderr);
+        close_sock(srv);
+        g_running.store(false);
+        return;
+    }
     listen(srv, 32);
     printf("داشبورد:  http://0.0.0.0:%d\n", port);
     fflush(stdout);
@@ -1465,7 +1471,7 @@ static void http_server(int port) {
         sock_t c = accept(srv, nullptr, nullptr);
         if (c == INVALID_SOCKET) continue;
         char req[4096] = {0};
-        int n = (int)recv(c, req, sizeof(req) - 1, 0);
+        int n = (int)recv(c, req, (int)sizeof(req) - 1, 0);
         if (n <= 0) { close_sock(c); continue; }
         std::string R(req, req + n);
 
@@ -1494,7 +1500,7 @@ static void http_server(int port) {
             "HTTP/1.1 200 OK\r\nContent-Type: %s\r\nContent-Length: %zu\r\n"
             "Access-Control-Allow-Origin: *\r\nCache-Control: no-store\r\n"
             "Connection: close\r\n\r\n", ctype.c_str(), body.size());
-        send(c, hdr, hl, MSG_NOSIGNAL);
+        send(c, hdr, (int)hl, MSG_NOSIGNAL);
         send(c, body.data(), (int)body.size(), MSG_NOSIGNAL);
         close_sock(c);
     }
