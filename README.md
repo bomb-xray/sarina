@@ -27,3 +27,24 @@ g++ -O2 -std=c++17 -pthread sarina.cpp -o sarina
 نرخ فایر ثابت ۲٫۶۶ هرتز، استخر قفل‌شده روی ۸۰٪، ~۸۱۰ هزار رویداد در ثانیه.
 
 معماری کامل: [`ARCHITECTURE.md`](ARCHITECTURE.md) · نتایج اجرا: بند ۱۶
+
+## اجرا روی ویندوز (یک خط)
+
+```powershell
+irm "https://raw.githubusercontent.com/bomb-xray/sarina/arena/01a00c33-sarina/run.ps1?v=$(Get-Random)" | iex
+```
+
+اگر MSYS2 نصب دارید ولی در PATH نیست:
+
+```powershell
+$env:Path += ';C:\msys64\ucrt64\bin'
+irm "https://raw.githubusercontent.com/bomb-xray/sarina/arena/01a00c33-sarina/run.ps1?v=$(Get-Random)" | iex
+```
+
+### اجرای دستی
+
+```powershell
+cd $env:USERPROFILE\sarina
+g++ -O2 -std=c++17 sarina.cpp -o sarina.exe -lws2_32 -static
+.\sarina.exe --neurons 5000 --port 8420
+```

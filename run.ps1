@@ -10,6 +10,7 @@
 $ErrorActionPreference = 'Stop'
 $ProgressPreference    = 'Continue'
 
+$ScriptVersion = '2.1'
 $Branch  = 'arena/01a00c33-sarina'
 $RawBase = "https://raw.githubusercontent.com/bomb-xray/sarina/$Branch"
 $Dir     = Join-Path $env:USERPROFILE 'sarina'
@@ -23,7 +24,7 @@ function Fail($t)     { Write-Host "  [!] $t" -ForegroundColor Red }
 
 Write-Host ''
 Write-Host '  ================================================' -ForegroundColor Cyan
-Write-Host '    سارینا - مغز دیجیتال' -ForegroundColor Cyan
+Write-Host "    سارینا - مغز دیجیتال   (اسکریپت v$ScriptVersion)" -ForegroundColor Cyan
 Write-Host '  ================================================' -ForegroundColor Cyan
 Write-Host ''
 
@@ -36,7 +37,8 @@ Ok $Dir
 # --- ۲. دریافت کد ----------------------------------------------------------
 Step 2 'دریافت کد (~۶۰ کیلوبایت)'
 try {
-    Invoke-WebRequest -Uri "$RawBase/sarina.cpp" -OutFile 'sarina.cpp' -UseBasicParsing -TimeoutSec 90
+    $bust = "?v=" + [guid]::NewGuid().ToString('N').Substring(0,8)
+    Invoke-WebRequest -Uri "$RawBase/sarina.cpp$bust" -OutFile 'sarina.cpp' -UseBasicParsing -TimeoutSec 90
     $kb = [math]::Round((Get-Item 'sarina.cpp').Length / 1KB, 1)
     Ok "sarina.cpp دریافت شد ($kb KB)"
 } catch {
@@ -53,15 +55,36 @@ $cmd = Get-Command g++ -ErrorAction SilentlyContinue
 if ($cmd) { $gpp = $cmd.Source }
 
 if (-not $gpp) {
+    # مسیرهای رایج — شامل MSYS2 که ممکن است نصب شده ولی در PATH نباشد
     $known = @(
         "$Dir\w64devkit\bin\g++.exe",
         'C:\msys64\ucrt64\bin\g++.exe',
         'C:\msys64\mingw64\bin\g++.exe',
+        'C:\msys64\clang64\bin\g++.exe',
         'C:\mingw64\bin\g++.exe',
+        'C:\MinGW\bin\g++.exe',
         'C:\ProgramData\mingw64\mingw64\bin\g++.exe',
-        "$env:LOCALAPPDATA\Programs\mingw64\bin\g++.exe"
+        "$env:LOCALAPPDATA\Programs\mingw64\bin\g++.exe",
+        "$env:ProgramFiles\LLVM\bin\clang++.exe"
     )
     foreach ($p in $known) { if (Test-Path $p) { $gpp = $p; break } }
+
+    # جست‌وجوی عمیق‌تر در محل‌های نصب معمول
+    if (-not $gpp) {
+        foreach ($root in @('C:\msys64', 'C:\tools', "$env:LOCALAPPDATA\Programs")) {
+            if (Test-Path $root) {
+                $hit = Get-ChildItem -Path $root -Filter 'g++.exe' -Recurse -ErrorAction SilentlyContinue |
+                       Select-Object -First 1
+                if ($hit) { $gpp = $hit.FullName; break }
+            }
+        }
+    }
+}
+
+if ($gpp) {
+    # به PATH نشست جاری اضافه کن تا DLLهای کامپایلر پیدا شوند
+    $binDir = Split-Path $gpp -Parent
+    if ($env:Path -notlike "*$binDir*") { $env:Path = "$binDir;$env:Path" }
 }
 
 if ($gpp) {
@@ -111,11 +134,23 @@ $exe = Join-Path $Dir 'sarina.exe'
 if (Test-Path $exe) { Remove-Item $exe -Force -ErrorAction SilentlyContinue }
 
 $log = Join-Path $env:TEMP 'sarina_build.txt'
-& $gpp -O2 -std=c++17 sarina.cpp -o $exe -lws2_32 -static 2>&1 | Tee-Object -FilePath $log | Out-Null
+
+# تلاش اول: پیوند ایستا (exe مستقل، بدون نیاز به DLL)
+& $gpp -O2 -std=c++17 sarina.cpp -o $exe -lws2_32 -static 2>&1 |
+    Tee-Object -FilePath $log | Out-Null
+
+# تلاش دوم: بدون -static (بعضی توزیع‌ها کتابخانه‌ی ایستا ندارند)
+if (-not (Test-Path $exe)) {
+    Warn 'پیوند ایستا نشد؛ تلاش بدون static …'
+    & $gpp -O2 -std=c++17 sarina.cpp -o $exe -lws2_32 2>&1 |
+        Tee-Object -FilePath $log -Append | Out-Null
+}
 
 if (-not (Test-Path $exe)) {
     Fail 'کامپایل ناموفق بود. خروجی کامپایلر:'
-    Get-Content $log -Tail 25 | ForEach-Object { Write-Host "        $_" -ForegroundColor DarkRed }
+    Get-Content $log -Tail 30 | ForEach-Object { Write-Host "        $_" -ForegroundColor DarkRed }
+    Write-Host ''
+    Write-Host "  گزارش کامل: $log" -ForegroundColor DarkGray
     return
 }
 Ok ("sarina.exe ساخته شد ({0} KB)" -f [math]::Round((Get-Item $exe).Length / 1KB, 0))
