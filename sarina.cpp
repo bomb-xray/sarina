@@ -26,10 +26,23 @@
 #include <thread>
 #include <vector>
 
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <unistd.h>
+#ifdef _WIN32
+  #include <winsock2.h>
+  #include <ws2tcpip.h>
+  #pragma comment(lib, "ws2_32.lib")
+  using socklen_t = int;
+  #define MSG_NOSIGNAL 0
+  static inline int  close_sock(SOCKET s) { return closesocket(s); }
+  using sock_t = SOCKET;
+#else
+  #include <arpa/inet.h>
+  #include <netinet/in.h>
+  #include <sys/socket.h>
+  #include <unistd.h>
+  static inline int  close_sock(int s) { return close(s); }
+  using sock_t = int;
+  #define INVALID_SOCKET (-1)
+#endif
 
 using i32 = int32_t;
 using i64 = int64_t;
@@ -168,7 +181,7 @@ struct Neuron {
 
     i64  mana     = 0;               // میلی‌مانا
     i64  cap      = 0;
-    i64  credit   = 0;               // اعتبار (رد واجد شرایط بودن)
+    u16  credit   = 0;               // اعتبار — ۲ بایت (بند ۱۶٫۶)؛ ۸ بیتی هم کافی است
     i64  dcredit  = 0;               // اعتبار پایانی برای اسپم
 
     vtime last_eval  = 0;
@@ -293,6 +306,7 @@ static vtime             g_stop_at = 0;      // ۰ = بی‌نهایت
 // منطق: برانگیختگی از ورودی + تازگی + نویز + بی‌قراری؛ با SEL شرط می‌سازیم.
 static std::vector<u32> seed_normal(int thresh, int width, int greed) {
     std::vector<u32> c;
+    // --- حسگرها ---
     c.push_back(enc(OP_SENSE, 1, 0, SN_INPOP));       // r1 = تعداد ورودی فعال
     c.push_back(enc(OP_SENSE, 2, 0, SN_FRESHPOP));    // r2 = تعداد تازه
     c.push_back(enc(OP_SENSE, 3, 0, SN_NOISE));       // r3 = نویز ۰..۲۵۵
@@ -300,7 +314,7 @@ static std::vector<u32> seed_normal(int thresh, int width, int greed) {
     c.push_back(enc(OP_SENSE, 5, 0, SN_TSF));         // r5 = ms از آخرین فایر
     c.push_back(enc(OP_SENSE, 6, 0, SN_INBITS));      // r6 = الگوی بیت ورودی
 
-    // excite = inpop*24 + fresh*40 + noise/6 + tsf/40
+    // --- برانگیختگی: ورودی + تازگی + نویز + بی‌قراری ---
     c.push_back(enc(OP_MUL, 7, 1, IM(24)));
     c.push_back(enc(OP_MUL, 8, 2, IM(40)));
     c.push_back(enc(OP_ADD, 7, 7, RG(8)));
@@ -309,21 +323,38 @@ static std::vector<u32> seed_normal(int thresh, int width, int greed) {
     c.push_back(enc(OP_DIV, 8, 5, IM(40)));
     c.push_back(enc(OP_ADD, 7, 7, RG(8)));            // r7 = برانگیختگی
 
-    c.push_back(enc(OP_GT,  9, 7, IM(thresh)));       // r9 = برانگیخته؟
-    c.push_back(enc(OP_GT, 10, 4, IM(greed)));        // r10 = مانا کافی؟
-    c.push_back(enc(OP_AND, 9, 9, RG(10)));           // r9 = هر دو
+    // --- تصمیم فایر: برانگیخته و پول‌دار ---
+    c.push_back(enc(OP_GT,  9, 7, IM(thresh)));
+    c.push_back(enc(OP_GT, 10, 4, IM(greed)));
+    c.push_back(enc(OP_AND, 9, 9, RG(10)));           // r9 = فایر کنم؟
 
-    // ماسک: عرض پایه، با برانگیختگی زیاد پهن‌تر
+    // --- ماسک پایه، پهن‌تر وقتی برانگیختگی بالاست ---
     c.push_back(enc(OP_IMM, 11, 0, IM(width)));
     c.push_back(enc(OP_GT,  12, 7, IM(thresh * 2)));
-    c.push_back(enc(OP_SHL, 13, 11, IM(3)));
+    c.push_back(enc(OP_SHL, 13, 11, IM(2)));
     c.push_back(enc(OP_OR,  13, 13, RG(11)));
-    c.push_back(enc(OP_SEL, 11, 12, (u16)((11 << 4) | 13)));  // r11 = c ? r13 : r11 …
-    c.push_back(enc(OP_SEL, 11,  9, (u16)((0 << 4) | 11)));   // اگر برانگیخته نبود → ۰
+    c.push_back(enc(OP_SEL, 11, 12, (u16)((13 << 4) | 11)));   // r11 = c ? r13 : r11
 
-    // الگوی بیت: ترکیب ورودی و نویز
-    c.push_back(enc(OP_XOR, 14, 6, RG(3)));
-    c.push_back(enc(OP_FIRE, 0, 11, RG(14)));
+    // --- چرخش حقیقی روی ۲۰ خط: هر خط شانس برابر، از جمله ۱۸ و ۱۹ ---
+    c.push_back(enc(OP_MOD, 14, 3, IM(20)));          // r14 = k = نویز % 20
+    c.push_back(enc(OP_SHL, 12, 11, RG(14)));         // r12 = base << k
+    c.push_back(enc(OP_IMM, 13, 0, IM(20)));
+    c.push_back(enc(OP_SUB, 13, 13, RG(14)));         // r13 = 20-k
+    c.push_back(enc(OP_SHR, 13, 11, RG(13)));         // r13 = base >> (20-k)
+    c.push_back(enc(OP_OR,  11, 12, RG(13)));         // چرخش کامل
+    c.push_back(enc(OP_SHL, 12, 11, IM(6)));          // نسخه‌ی جابه‌جاشده به خطوط بالا
+    c.push_back(enc(OP_OR,  11, 11, RG(12)));         // پوشش هر ۲۰ خط
+    c.push_back(enc(OP_SEL, 11,  9, (u16)((11 << 4) | 0)));    // نه‌فایر → ۰
+
+    // --- الگوی بیت: در تمام ۲۰ خط پخش می‌شود (اصلاح مرحله‌ی ۰) ---
+    // نویز ۸ بیتی است؛ با سه جابه‌جایی، بیت‌های ۰..۲۳ را پر می‌کند
+    c.push_back(enc(OP_MOV, 15, 3, RG(0)));
+    c.push_back(enc(OP_SHL, 12, 3, IM(7)));
+    c.push_back(enc(OP_XOR, 15, 15, RG(12)));
+    c.push_back(enc(OP_SHL, 12, 3, IM(13)));
+    c.push_back(enc(OP_XOR, 15, 15, RG(12)));
+    c.push_back(enc(OP_XOR, 15, 15, RG(6)));
+    c.push_back(enc(OP_FIRE, 0, 11, RG(15)));
     c.push_back(enc(OP_HALT, 0, 0, 0));
     return c;
 }
@@ -369,8 +400,10 @@ static std::vector<u32> seed_memory(int thresh) {
 
     c.push_back(enc(OP_IMM, 13, 0, IM(0x3F)));
     c.push_back(enc(OP_SEL, 13, 11, (u16)((0 << 4) | 13)));
-    c.push_back(enc(OP_XOR, 14, 6, RG(8)));
-    c.push_back(enc(OP_FIRE, 0, 13, RG(14)));
+    c.push_back(enc(OP_SENSE, 15, 0, SN_NOISE));
+    c.push_back(enc(OP_XOR,   14, 6, RG(8)));
+    c.push_back(enc(OP_XOR,   14, 14, RG(15)));
+    c.push_back(enc(OP_FIRE,   0, 13, RG(14)));
     c.push_back(enc(OP_HALT, 0, 0, 0));
     return c;
 }
@@ -717,7 +750,7 @@ static void draw_from_pool(Neuron& nu) {
     if (want <= 0 || L.pool <= 0) return;
     i64 got = std::min(want, L.pool);
     // سهم به نسبت اعتبار: نورون بی‌اعتبار کندتر پر می‌شود (بند ۵٫۳)
-    i64 share = 40 + std::min<i64>(60, nu.credit / MANA);   // ۴۰٪..۱۰۰٪
+    i64 share = 40 + std::min<i64>(60, (i64)nu.credit / 256);   // ۴۰٪..۱۰۰٪
     got = got * share / 100;
     if (got <= 0) return;
     L.pool  -= got;
@@ -789,9 +822,11 @@ static void neuron_eval(u32 id) {
     // --- تلاش برای پر کردن مخزن ---
     if (nu.mana < nu.cap) draw_from_pool(nu);
 
-    // --- محو تدریجی اعتبار ---
-    nu.credit -= nu.credit * dt / (5 * SEC);
-    if (nu.credit < 0) nu.credit = 0;
+    // --- محو تدریجی اعتبار (شیفت ارزان، نه تقسیم) ---
+    {
+        i64 decay = (i64)nu.credit * dt / (5 * SEC);
+        nu.credit = (u16)((i64)nu.credit > decay ? (i64)nu.credit - decay : 0);
+    }
 
     // --- حالت‌ها (بند ۶) ---
     if (nu.mana <= 0) {
@@ -874,8 +909,10 @@ static void neuron_eval(u32 id) {
             burn(cost);
             nu.last_fire = B.now;
             nu.fires++; B.c_fires++;
-            nu.credit += cost;                              // اعتبار = سرمایه‌گذاری
-            if (nu.credit > 100 * MANA) nu.credit = 100 * MANA;
+            {   // اعتبار = سرمایه‌گذاری؛ اشباع در ۶۵۵۳۵
+                i64 nc = (i64)nu.credit + cost / 16;
+                nu.credit = (u16)std::min<i64>(nc, 65535);
+            }
 
             for (auto& e : nu.out) {
                 int li = e.line % nl;
@@ -886,9 +923,14 @@ static void neuron_eval(u32 id) {
                 }
             }
             // خروجی لوب پایانی → دستگاه (بند ۱۱٫۱)
+            // ۲ خط پایانی هر نورون خروجی، به خروجی واقعی تبدیل می‌شود.
             if (nu.lobe == L_OUTPUT) {
-                B.out_bits.push_back((u8)(res.bits & 1));
-                B.out_bits.push_back((u8)((res.bits >> 1) & 1));
+                int l0 = nl - 2, l1 = nl - 1;
+                bool a0 = (res.mask >> l0) & 1, a1 = (res.mask >> l1) & 1;
+                if (a0 || a1) {
+                    B.out_bits.push_back((u8)((res.bits >> l0) & 1));
+                    B.out_bits.push_back((u8)((res.bits >> l1) & 1));
+                }
                 if (B.out_bits.size() > 4096) B.out_bits.erase(B.out_bits.begin(), B.out_bits.begin() + 2048);
             }
         }
@@ -994,7 +1036,7 @@ static bool save_brain(const char* path) {
         fwrite(&nu.state, 1, 1, f); fwrite(&nu.half, 1, 1, f);
         fwrite(&nu.x, 4, 1, f); fwrite(&nu.y, 4, 1, f);
         fwrite(&nu.mana, 8, 1, f); fwrite(&nu.cap, 8, 1, f);
-        fwrite(&nu.credit, 8, 1, f);
+        fwrite(&nu.credit, 2, 1, f);
         fwrite(&nu.last_fire, 8, 1, f); fwrite(&nu.last_input, 8, 1, f);
         fwrite(&nu.prog, 4, 1, f);
         fwrite(&nu.rng.s, 8, 1, f);
@@ -1034,7 +1076,7 @@ static bool load_brain(const char* path) {
         fread(&nu.state,1,1,f); fread(&nu.half,1,1,f);
         fread(&nu.x,4,1,f); fread(&nu.y,4,1,f);
         fread(&nu.mana,8,1,f); fread(&nu.cap,8,1,f);
-        fread(&nu.credit,8,1,f);
+        fread(&nu.credit,2,1,f);
         fread(&nu.last_fire,8,1,f); fread(&nu.last_input,8,1,f);
         fread(&nu.prog,4,1,f);
         fread(&nu.rng.s,8,1,f);
@@ -1404,10 +1446,13 @@ static int qparam(const std::string& req, const char* key, int def) {
 }
 
 static void http_server(int port) {
-    int srv = socket(AF_INET, SOCK_STREAM, 0);
-    if (srv < 0) { perror("socket"); return; }
+#ifdef _WIN32
+    WSADATA wsa; WSAStartup(MAKEWORD(2,2), &wsa);
+#endif
+    sock_t srv = socket(AF_INET, SOCK_STREAM, 0);
+    if (srv == INVALID_SOCKET) { perror("socket"); return; }
     int one = 1;
-    setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, (const char*)&one, sizeof one);
     sockaddr_in a{}; a.sin_family = AF_INET;
     a.sin_addr.s_addr = htonl(INADDR_ANY);          // 0.0.0.0
     a.sin_port = htons((u16)port);
@@ -1417,11 +1462,11 @@ static void http_server(int port) {
     fflush(stdout);
 
     while (g_running.load()) {
-        int c = accept(srv, nullptr, nullptr);
-        if (c < 0) continue;
+        sock_t c = accept(srv, nullptr, nullptr);
+        if (c == INVALID_SOCKET) continue;
         char req[4096] = {0};
-        ssize_t n = recv(c, req, sizeof(req) - 1, 0);
-        if (n <= 0) { close(c); continue; }
+        int n = (int)recv(c, req, sizeof(req) - 1, 0);
+        if (n <= 0) { close_sock(c); continue; }
         std::string R(req, req + n);
 
         std::string body, ctype = "application/json; charset=utf-8";
@@ -1450,10 +1495,10 @@ static void http_server(int port) {
             "Access-Control-Allow-Origin: *\r\nCache-Control: no-store\r\n"
             "Connection: close\r\n\r\n", ctype.c_str(), body.size());
         send(c, hdr, hl, MSG_NOSIGNAL);
-        send(c, body.data(), body.size(), MSG_NOSIGNAL);
-        close(c);
+        send(c, body.data(), (int)body.size(), MSG_NOSIGNAL);
+        close_sock(c);
     }
-    close(srv);
+    close_sock(srv);
 }
 
 // ============================================================================
@@ -1461,7 +1506,7 @@ static void http_server(int port) {
 // ============================================================================
 
 int main(int argc, char** argv) {
-    int  N = 5000, port = 8080, headless_s = 0;
+    int  N = 5000, port = 8420, headless_s = 0;
     u64  seed = 12345;
     const char* loadf = nullptr;
 
