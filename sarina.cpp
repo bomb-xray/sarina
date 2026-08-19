@@ -29,6 +29,7 @@
 #ifdef _WIN32
   #include <winsock2.h>
   #include <ws2tcpip.h>
+  #include <windows.h>
   #pragma comment(lib, "ws2_32.lib")
   using socklen_t = int;
   #define MSG_NOSIGNAL 0
@@ -296,6 +297,8 @@ static std::atomic<bool> g_paused{false};
 static std::atomic<int>  g_speed{1000};      // ‰ نسبت به بی‌درنگ؛ ۰ = بیشینه
 static std::atomic<bool> g_shutdown_req{false};
 static std::atomic<i64>  g_reward_pending{0};
+static bool              g_open_browser = true;
+static std::atomic<bool> g_server_up{false};
 static vtime             g_stop_at = 0;      // ۰ = بی‌نهایت
 
 // ============================================================================
@@ -1464,7 +1467,10 @@ static void http_server(int port) {
         return;
     }
     listen(srv, 32);
-    printf("داشبورد:  http://0.0.0.0:%d\n", port);
+    g_server_up.store(true);
+    printf("  داشبورد آماده است:  http://localhost:%d\n", port);
+    printf("  ─────────────────────────────────────────────────\n");
+    printf("  این پنجره را باز نگه دارید. بستن آن مغز را متوقف می‌کند.\n\n");
     fflush(stdout);
 
     while (g_running.load()) {
@@ -1511,7 +1517,31 @@ static void http_server(int port) {
 //  ۱۶. main
 // ============================================================================
 
+// کنسول ویندوز پیش‌فرض UTF-8 نیست → متن فارسی خراب نمایش داده می‌شود
+static void console_utf8() {
+#ifdef _WIN32
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
+#endif
+}
+
+// باز کردن خودکار مرورگر روی داشبورد
+static void open_browser(int port) {
+    char url[64];
+    snprintf(url, sizeof url, "http://localhost:%d", port);
+#ifdef _WIN32
+    ShellExecuteA(nullptr, "open", url, nullptr, nullptr, SW_SHOWNORMAL);
+#elif defined(__APPLE__)
+    char cmd[128]; snprintf(cmd, sizeof cmd, "open '%s' >/dev/null 2>&1 &", url);
+    (void)system(cmd);
+#else
+    char cmd[128]; snprintf(cmd, sizeof cmd, "xdg-open '%s' >/dev/null 2>&1 &", url);
+    (void)system(cmd);
+#endif
+}
+
 int main(int argc, char** argv) {
+    console_utf8();
     int  N = 5000, port = 8420, headless_s = 0;
     u64  seed = 12345;
     const char* loadf = nullptr;
@@ -1525,6 +1555,7 @@ int main(int argc, char** argv) {
         else if (a == "--load")    loadf = nxt();
         else if (a == "--headless")headless_s = atoi(nxt());
         else if (a == "--speed")   g_speed.store(atoi(nxt()));
+        else if (a == "--no-browser") g_open_browser = false;
     }
 
     printf("\n");
@@ -1550,6 +1581,13 @@ int main(int argc, char** argv) {
     if (!headless_s) srv = std::thread(http_server, port);
 
     std::thread sim(sim_loop);
+
+    // منتظر بالا آمدن سرور، سپس باز کردن مرورگر
+    if (!headless_s) {
+        for (int i = 0; i < 40 && g_running.load() && !g_server_up.load(); ++i)
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        if (g_server_up.load() && g_open_browser) open_browser(port);
+    }
 
     if (headless_s) {
         // اجرای بی‌داشبورد برای سنجش — پایان قطعی در مرز رویداد (تکرارپذیر)
@@ -1581,8 +1619,34 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    // گزارش زنده در کنسول — تا کاربر ببیند مغز کار می‌کند
+    {
+        int line = 0;
+        while (g_running.load()) {
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+            std::lock_guard<std::mutex> lk(g_mx);
+            Stats& s = g_stats;
+            if (s.alive == 0) continue;
+            if (line % 12 == 0) {
+                printf("\n  %7s %9s %9s %8s %8s %11s\n",
+                       "time", "alive", "healthy", "fire/s", "pool%", "events/s");
+                printf("  %7s %9s %9s %8s %8s %11s\n",
+                       "-------", "---------", "---------", "--------", "--------", "-----------");
+            }
+            double pp = 0;
+            for (int L = 0; L < N_LOBES; ++L) pp += (double)s.pool[L] / std::max<i64>(1, s.ptgt[L]);
+            pp = pp / N_LOBES * 100;
+            printf("  %6.0fs %9lld %9lld %8.2f %7.0f%% %11.0f\n",
+                   (double)s.vtime_us / SEC, (long long)s.alive, (long long)s.healthy,
+                   s.fire_hz, pp, s.wall_s > 0 ? s.events / s.wall_s : 0.0);
+            fflush(stdout);
+            ++line;
+        }
+    }
+
     sim.join();
     g_running.store(false);
     if (srv.joinable()) srv.detach();
+    printf("\n  متوقف شد.\n");
     return 0;
 }

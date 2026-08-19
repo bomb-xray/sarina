@@ -10,7 +10,14 @@
 $ErrorActionPreference = 'Stop'
 $ProgressPreference    = 'Continue'
 
-$ScriptVersion = '2.1'
+# کنسول ویندوز پیش‌فرض UTF-8 نیست → متن فارسی به‌هم می‌ریزد
+try {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+    $OutputEncoding           = [System.Text.Encoding]::UTF8
+    chcp 65001 > $null
+} catch { }
+
+$ScriptVersion = '2.2'
 $Branch  = 'arena/01a00c33-sarina'
 $RawBase = "https://raw.githubusercontent.com/bomb-xray/sarina/$Branch"
 $Dir     = Join-Path $env:USERPROFILE 'sarina'
@@ -161,16 +168,22 @@ Step 5 "اجرا روی پورت $Port"
 Get-Process sarina -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 Start-Sleep -Milliseconds 400
 
+# در پنجره‌ی جداگانه اجرا می‌شود تا بسته شدن این پاورشل مغز را نکشد.
+# خود برنامه مرورگر را باز می‌کند.
 $proc = Start-Process -FilePath $exe `
         -ArgumentList "--neurons $Neurons --port $Port" `
         -PassThru -WorkingDirectory $Dir
 
-# منتظر بالا آمدن سرور
 $url   = "http://localhost:$Port"
 $ready = $false
-foreach ($i in 1..30) {
+foreach ($i in 1..40) {
     Start-Sleep -Milliseconds 500
-    if ($proc.HasExited) { Fail 'برنامه بلافاصله بسته شد.'; return }
+    if ($proc.HasExited) {
+        Fail 'برنامه بلافاصله بسته شد.'
+        Write-Host "  احتمالاً پورت $Port اشغال است. با پورت دیگری امتحان کنید:" -ForegroundColor Yellow
+        Write-Host "     cd `"$Dir`"; .\sarina.exe --port 9000" -ForegroundColor White
+        return
+    }
     try {
         $r = Invoke-WebRequest -Uri "$url/stats" -UseBasicParsing -TimeoutSec 2
         if ($r.StatusCode -eq 200) { $ready = $true; break }
@@ -179,14 +192,18 @@ foreach ($i in 1..30) {
 
 Write-Host ''
 if ($ready) {
-    Ok 'مغز زنده است.'
+    Write-Host '  ================================================' -ForegroundColor Green
+    Write-Host '    مغز زنده است' -ForegroundColor Green
+    Write-Host '  ================================================' -ForegroundColor Green
     Write-Host ''
     Write-Host "  داشبورد : $url" -ForegroundColor Cyan
+    Write-Host '            (مرورگر خودکار باز می‌شود)' -ForegroundColor DarkGray
+    Write-Host ''
+    Write-Host '  پنجره‌ی سیاه سارینا را باز نگه دارید.' -ForegroundColor Yellow
     Write-Host "  توقف    : Stop-Process -Id $($proc.Id)" -ForegroundColor DarkGray
     Write-Host ''
-    Start-Process $url
 } else {
     Warn "سرور پاسخ نداد. شاید پورت $Port اشغال است."
-    Write-Host "  اجرای دستی با پورت دیگر:" -ForegroundColor White
+    Write-Host '  اجرای دستی با پورت دیگر:' -ForegroundColor White
     Write-Host "     cd `"$Dir`"; .\sarina.exe --port 9000" -ForegroundColor White
 }
