@@ -240,6 +240,23 @@ struct LobePool {
     bool emergency = false;
 };
 
+// --- دستگاه: کلمه‌ی خروجی که منتظر نمره است (بند ۱۱٫۲) ---
+struct OutWord {
+    u32         id;
+    std::string text;
+    double      t;          // زمان مجازی تولد، ثانیه
+    int         score;      // نمره‌ی داده‌شده
+    bool        scored;
+};
+
+// --- پیام چت ---
+struct ChatMsg {
+    u32         id;
+    bool        from_human;
+    std::string text;
+    double      t;
+};
+
 struct Stats {
     i64 vtime_us = 0;
     double wall_s = 0;
@@ -255,6 +272,10 @@ struct Stats {
     double ev_per_s = 0;
     std::string out_text;
     std::vector<double> hist_fire, hist_pool, hist_alive;
+    std::vector<OutWord> words;
+    std::vector<ChatMsg> chat;
+    i64 words_total = 0, words_scored = 0;
+    double avg_score = 0;
 };
 
 struct Brain {
@@ -283,6 +304,21 @@ struct Brain {
     // خروجی مغز → دستگاه
     std::vector<u8> out_bits;
     std::string     out_text;
+
+    // --- دستگاه: بخش زبان ---
+    std::string          cur_word;        // کلمه‌ی در حال ساخت
+    std::vector<OutWord> words;           // کلمات کامل‌شده
+    std::vector<ChatMsg> chat;
+    u32                  next_word_id = 1;
+    u32                  next_msg_id  = 1;
+    i64                  words_total  = 0;
+    i64                  words_scored = 0;
+    double               score_sum    = 0;
+
+    // --- دستگاه: بخش حواس (ورودی انسان → مغز) ---
+    std::deque<u8>  in_queue;             // بیت‌های منتظر تزریق
+    std::deque<u8>  mirror_queue;         // آینه: خروجی خودش با تأخیر
+    vtime           next_inject = 0;
 
     inline void push(vtime t, u32 target, u8 type, u8 line = 0, u8 bit = 0) {
         q.push(Event{t, target, type, line, bit, seq++});
@@ -1004,16 +1040,112 @@ static void system_tick() {
 //  ۱۲. دستگاه — کدک فارسی (بند ۱۱٫۱)
 // ============================================================================
 
+// ---------------------------------------------------------------------------
+//  دستگاه — بخش زبان: بیت → بایت → کلمه (بند ۱۱٫۱)
+//  فاصله جداکننده‌ی کلمات است و به کلمه‌ی قبلش می‌چسبد.
+// ---------------------------------------------------------------------------
 static void device_decode() {
-    // بیت‌ها → بایت → UTF-8 ؛ بایت نامعتبر دور ریخته می‌شود
     while (B.out_bits.size() >= 8) {
         u8 byte = 0;
         for (int i = 0; i < 8; ++i) byte = (u8)((byte << 1) | B.out_bits[i]);
         B.out_bits.erase(B.out_bits.begin(), B.out_bits.begin() + 8);
-        if (byte >= 32 && byte < 127) B.out_text.push_back((char)byte);
-        else if (byte == 32) B.out_text.push_back(' ');
+
+        // آینه: هرچه گفت با تأخیر به نیمه‌ی ب لوب ورودی برمی‌گردد (بند ۴)
+        for (int i = 7; i >= 0; --i) B.mirror_queue.push_back((u8)((byte >> i) & 1));
+
+        bool is_space = (byte == 32 || byte == 10 || byte == 13 || byte == 9);
+        bool printable = (byte >= 32 && byte < 127);
+
+        if (is_space) {
+            if (!B.cur_word.empty()) {
+                B.cur_word.push_back(' ');            // فاصله به کلمه می‌چسبد
+                OutWord w;
+                w.id = B.next_word_id++;
+                w.text = B.cur_word;
+                w.t = (double)B.now / SEC;
+                w.score = 0; w.scored = false;
+                B.words.push_back(w);
+                B.words_total++;
+                if (B.words.size() > 250) B.words.erase(B.words.begin());
+                B.cur_word.clear();
+            }
+        } else if (printable) {
+            B.cur_word.push_back((char)byte);
+            // کلمه‌ی بیش از حد بلند را می‌بندیم تا نمره‌دهی ممکن بماند
+            if (B.cur_word.size() >= 24) {
+                OutWord w;
+                w.id = B.next_word_id++;
+                w.text = B.cur_word;
+                w.t = (double)B.now / SEC;
+                w.score = 0; w.scored = false;
+                B.words.push_back(w);
+                B.words_total++;
+                if (B.words.size() > 250) B.words.erase(B.words.begin());
+                B.cur_word.clear();
+            }
+        }
+
+        if (printable) B.out_text.push_back((char)byte);
     }
     if (B.out_text.size() > 400) B.out_text.erase(0, B.out_text.size() - 400);
+}
+
+// ---------------------------------------------------------------------------
+//  دستگاه — بخش حواس: متن انسان → بیت → نیمه‌ی الف لوب ورودی
+// ---------------------------------------------------------------------------
+static void device_say(const std::string& text) {
+    std::lock_guard<std::mutex> lk(g_mx);
+    ChatMsg m;
+    m.id = B.next_msg_id++;
+    m.from_human = true;
+    m.text = text;
+    m.t = (double)B.now / SEC;
+    B.chat.push_back(m);
+    if (B.chat.size() > 120) B.chat.erase(B.chat.begin());
+
+    for (unsigned char ch : text)
+        for (int i = 7; i >= 0; --i) B.in_queue.push_back((u8)((ch >> i) & 1));
+    B.in_queue.push_back(0); B.in_queue.push_back(0);   // مکث
+    for (int i = 7; i >= 0; --i) B.in_queue.push_back((u8)((32 >> i) & 1)); // فاصله‌ی پایانی
+}
+
+// تزریق بیت‌ها به دو خط پایانی نورون‌های نیمه‌ی مربوطه‌ی لوب ورودی
+static void device_inject() {
+    if (B.now < B.next_inject) return;
+    B.next_inject = B.now + 8 * MS;      // ~۱۲۵ بیت در ثانیه‌ی مجازی
+
+    auto feed = [&](std::deque<u8>& q, u8 half) {
+        if (q.empty()) return;
+        u8 b0 = q.front(); q.pop_front();
+        u8 b1 = 0;
+        if (!q.empty()) { b1 = q.front(); q.pop_front(); }
+        int fed = 0;
+        for (auto& nu : B.n) {
+            if (nu.lobe != L_INPUT || nu.half != half || nu.state == S_DEAD) continue;
+            int nl = nu.lines();
+            deliver(nu.id, (u8)(nl - 2), b0);
+            deliver(nu.id, (u8)(nl - 1), b1);
+            if (++fed >= 64) break;      // به یک زیرمجموعه تزریق می‌شود، نه همه
+        }
+    };
+    feed(B.in_queue,     0);             // نیمه‌ی الف — از انسان
+    feed(B.mirror_queue, 1);             // نیمه‌ی ب  — آینه‌ی خود مدل
+}
+
+// ---------------------------------------------------------------------------
+//  دستگاه — داور: نمره‌ی کلمه → مانا (بند ۱۱٫۲)
+// ---------------------------------------------------------------------------
+static void device_score(u32 word_id, int score) {
+    std::lock_guard<std::mutex> lk(g_mx);
+    for (auto& w : B.words) {
+        if (w.id != word_id) continue;
+        if (w.scored) B.score_sum -= w.score; else B.words_scored++;
+        w.score  = score;
+        w.scored = true;
+        B.score_sum += score;
+        g_reward_pending.fetch_add((i64)score * MANA);
+        return;
+    }
 }
 
 // ============================================================================
@@ -1143,6 +1275,14 @@ static void snapshot(double wall) {
     vtime dv = B.now - B.t_prev;
     if (dv > 0) s.fire_hz = (double)(B.c_fires - B.c_fires_prev) * SEC / dv / std::max<i64>(1, s.alive);
     s.out_text = B.out_text;
+    // ۴۰ کلمه‌ی آخر برای نمره‌دهی
+    size_t wstart = B.words.size() > 40 ? B.words.size() - 40 : 0;
+    s.words.assign(B.words.begin() + wstart, B.words.end());
+    size_t cstart = B.chat.size() > 40 ? B.chat.size() - 40 : 0;
+    s.chat.assign(B.chat.begin() + cstart, B.chat.end());
+    s.words_total  = B.words_total;
+    s.words_scored = B.words_scored;
+    s.avg_score    = B.words_scored ? B.score_sum / B.words_scored : 0.0;
 
     std::lock_guard<std::mutex> lk(g_mx);
     s.hist_fire  = g_stats.hist_fire;
@@ -1205,6 +1345,8 @@ static void sim_loop() {
             case EV_SYS:    system_tick(); break;
             default: break;
         }
+
+        device_inject();
 
         if (B.now >= next_snap) {
             device_decode();
@@ -1270,6 +1412,40 @@ input[type=range]{width:130px;vertical-align:middle}
 .out{background:#080b10;border:1px solid #1b2534;border-radius:8px;padding:12px;min-height:76px;
      font-family:monospace;direction:ltr;text-align:left;font-size:12px;color:#8de0a8;
      word-break:break-all;white-space:pre-wrap}
+.chatpanel{position:relative}
+.chatstats{display:flex;gap:16px;flex-wrap:wrap;font-size:11px;color:#75879e;margin-bottom:10px}
+.chatstats b{color:#dfe7f0;font-variant-numeric:tabular-nums}
+.chatstats .auto{margin-right:auto;cursor:pointer;user-select:none}
+.stream{background:#080b10;border:1px solid #1b2534;border-radius:8px;padding:12px;
+        height:300px;overflow-y:auto;font-size:14px;line-height:2.4}
+.stream::-webkit-scrollbar{width:9px}
+.stream::-webkit-scrollbar-thumb{background:#243349;border-radius:5px}
+.hw{display:block;background:#152a3f;border:1px solid #24466b;border-radius:8px;
+    padding:7px 12px;margin:7px 0;color:#a8d0ff;direction:rtl}
+.hw::before{content:'تو: ';color:#5d7086;font-size:11px}
+.w{display:inline-block;padding:2px 8px;margin:2px 3px;border-radius:6px;cursor:pointer;
+   background:#121a26;border:1px solid #1e2a3a;font-family:monospace;direction:ltr;
+   transition:.12s;font-size:13px}
+.w:hover{background:#1d2b3e;border-color:#3a5a80;transform:translateY(-1px)}
+.w.sc{border-color:#2b7d55;background:#0f2a1c;color:#8de0a8}
+.w.sn{border-color:#7d2b2b;background:#2a1010;color:#ff9b9b}
+.w .b{font-size:10px;opacity:.85;margin-right:5px;font-family:sans-serif}
+.composer{display:flex;gap:8px;margin-top:11px}
+.composer input{flex:1;background:#0c1119;border:1px solid #1e2a3a;border-radius:7px;
+                padding:9px 12px;color:#dfe7f0;font-family:inherit;font-size:13px;direction:rtl}
+.composer input:focus{outline:none;border-color:#2a4a70}
+.hint{font-size:11px;color:#5d7086;margin-top:8px}
+.pop{display:none;position:fixed;z-index:99;background:#141d2b;border:1px solid #2a3a52;
+     border-radius:11px;padding:13px;box-shadow:0 12px 40px #000a}
+.pop.on{display:block}
+.popw{font-family:monospace;direction:ltr;color:#8de0a8;margin-bottom:10px;font-size:14px;
+      background:#080b10;padding:7px 10px;border-radius:6px;text-align:center}
+.popr{display:grid;grid-template-columns:repeat(4,1fr);gap:5px;margin-bottom:7px}
+.popr button{padding:7px 4px;font-size:12px}
+.popr button[data-s^="-"]{background:#3a1616;border-color:#6b2b2b}
+.popr2{display:flex;gap:5px}
+.popr2 input{flex:1;background:#0c1119;border:1px solid #1e2a3a;border-radius:7px;
+             padding:6px 9px;color:#dfe7f0;font-family:inherit;font-size:12px;width:90px}
 .verdict{padding:11px 15px;border-radius:9px;margin-bottom:14px;font-size:13px;font-weight:600}
 .v-ok{background:#0f2a1c;border:1px solid #1e5f3f;color:#7fe0a8}
 .v-warn{background:#2a2410;border:1px solid #6b5a1e;color:#ffd97a}
@@ -1318,7 +1494,46 @@ input[type=range]{width:130px;vertical-align:middle}
   </div>
 
   <div class="panel"><h3>جمعیت زنده در طول زمان</h3><canvas id="c3"></canvas></div>
-  <div class="panel"><h3>شنود خروجی لوب پایانی</h3><div class="out" id="out">…</div></div>
+  <div class="panel chatpanel">
+    <h3>گفتگو و نمره‌دهی</h3>
+    <div class="chatstats">
+      <span>کلمات تولیدشده <b id="wt">۰</b></span>
+      <span>نمره‌داده‌شده <b id="ws">۰</b></span>
+      <span>میانگین نمره <b id="wa">۰</b></span>
+      <label class="auto"><input type="checkbox" id="autoscroll" checked> دنبال کردن</label>
+    </div>
+
+    <div id="stream" class="stream"></div>
+
+    <div class="composer">
+      <input id="msg" type="text" placeholder="چیزی به مدل بگو…" autocomplete="off">
+      <button class="p" id="send">بگو</button>
+    </div>
+    <div class="hint">
+      روی هر کلمه کلیک کن تا نمره بدهی · نمره‌ی سریع با کلیک راست: <b>+۱۰</b>
+    </div>
+  </div>
+
+  <div id="pop" class="pop">
+    <div class="popw" id="popw">—</div>
+    <div class="popr">
+      <button data-s="-1000">−۱۰۰۰</button>
+      <button data-s="-100">−۱۰۰</button>
+      <button data-s="-10">−۱۰</button>
+      <button data-s="-1">−۱</button>
+      <button data-s="1">۱</button>
+      <button data-s="3">۳</button>
+      <button data-s="5">۵</button>
+      <button data-s="10">۱۰</button>
+    </div>
+    <div class="popr2">
+      <input id="custom" type="number" placeholder="نمره‌ی دلخواه" step="1">
+      <button class="p" id="capply">اعمال</button>
+      <button id="pclose">بستن</button>
+    </div>
+  </div>
+
+  <div class="panel"><h3>جریان خام بیت‌ها</h3><div class="out" id="out">…</div></div>
 </div>
 <script>
 const LOBE=['لوب ورودی','لوب مرکزی','لوب پایانی'];
@@ -1367,6 +1582,10 @@ async function tick(){
   spark('c2',s.h_pool,'#3ddc84',0);
   spark('c3',s.h_alive,'#c792ea');
   document.getElementById('out').textContent=s.out||'…';
+  renderStream(s);
+  document.getElementById('wt').textContent=fa(s.wtotal||0);
+  document.getElementById('ws').textContent=fa(s.wscored||0);
+  document.getElementById('wa').textContent=(s.wavg||0).toFixed(1);
   const v=document.getElementById('verdict');
   const alivePct=s.alive/(s.alive+s.dead)*100;
   if(s.vt<10){v.className='verdict v-warn';v.textContent='در حال جمع‌آوری داده…';}
@@ -1379,6 +1598,74 @@ async function tick(){
   else{v.className='verdict v-ok';
     v.textContent='✓ تعادل زنده — جمعیت پایدار، فعالیت مداوم، اقتصاد در حال کار.';}
 }
+// ---------- جریان گفتگو ----------
+let lastKey='';
+function renderStream(s){
+  const el=document.getElementById('stream');
+  const items=[];
+  (s.chat||[]).forEach(m=>items.push({t:m.t,human:1,text:m.m,id:'c'+m.id}));
+  (s.words||[]).forEach(w=>items.push({t:w.t,human:0,text:w.w,id:w.id,sc:w.s,done:w.d}));
+  items.sort((a,b)=>a.t-b.t);
+  const key=items.map(i=>i.id+':'+(i.sc||0)+(i.done||0)).join(',');
+  if(key===lastKey)return;
+  lastKey=key;
+  const near=el.scrollHeight-el.scrollTop-el.clientHeight<80;
+  let h='';
+  for(const it of items){
+    if(it.human){ h+=`<div class="hw">${esc(it.text)}</div>`; continue; }
+    const cls=it.done?(it.sc>0?'w sc':(it.sc<0?'w sn':'w')):'w';
+    const badge=it.done?`<span class="b">${it.sc>0?'+':''}${fa(it.sc)}</span>`:'';
+    h+=`<span class="${cls}" data-id="${it.id}" data-w="${esc(it.text)}">${esc(it.text)}${badge}</span>`;
+  }
+  el.innerHTML=h||'<span class="dim">هنوز کلمه‌ای تولید نشده…</span>';
+  if(near&&document.getElementById('autoscroll').checked) el.scrollTop=el.scrollHeight;
+}
+const esc=t=>t.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+// ---------- نمره‌دهی ----------
+let curId=null;
+const pop=document.getElementById('pop');
+document.getElementById('stream').addEventListener('click',e=>{
+  const w=e.target.closest('.w'); if(!w)return;
+  curId=w.dataset.id;
+  document.getElementById('popw').textContent=w.dataset.w;
+  const r=w.getBoundingClientRect();
+  pop.classList.add('on');
+  const pw=pop.offsetWidth,ph=pop.offsetHeight;
+  let x=r.left+r.width/2-pw/2, y=r.bottom+8;
+  if(y+ph>innerHeight-10) y=r.top-ph-8;
+  pop.style.left=Math.max(10,Math.min(innerWidth-pw-10,x))+'px';
+  pop.style.top=Math.max(10,y)+'px';
+  document.getElementById('custom').value='';
+});
+document.getElementById('stream').addEventListener('contextmenu',e=>{
+  const w=e.target.closest('.w'); if(!w)return;
+  e.preventDefault(); score(w.dataset.id,10);
+});
+function score(id,v){
+  fetch('/score?id='+id+'&s='+v).then(()=>{lastKey='';tick();});
+  pop.classList.remove('on'); curId=null;
+}
+pop.querySelectorAll('.popr button').forEach(b=>
+  b.onclick=()=>{ if(curId) score(curId,+b.dataset.s); });
+document.getElementById('capply').onclick=()=>{
+  const v=parseInt(document.getElementById('custom').value,10);
+  if(curId&&!isNaN(v)) score(curId,v);};
+document.getElementById('custom').onkeydown=e=>{
+  if(e.key==='Enter') document.getElementById('capply').click();};
+document.getElementById('pclose').onclick=()=>{pop.classList.remove('on');curId=null;};
+document.addEventListener('click',e=>{
+  if(!pop.contains(e.target)&&!e.target.closest('.w')) pop.classList.remove('on');});
+
+// ---------- ارسال پیام ----------
+function send(){
+  const i=document.getElementById('msg'), t=i.value.trim();
+  if(!t)return;
+  fetch('/say?t='+encodeURIComponent(t)).then(()=>{i.value='';lastKey='';tick();});
+}
+document.getElementById('send').onclick=send;
+document.getElementById('msg').onkeydown=e=>{if(e.key==='Enter')send();};
+
 document.getElementById('pause').onclick=async e=>{
   const r=await (await fetch('/pause')).json();
   e.target.textContent=r.paused?'ادامه':'توقف';};
@@ -1432,12 +1719,36 @@ static std::string json_stats() {
     arr("h_pool", s.hist_pool, false);
     arr("h_alive", s.hist_alive, false);
 
-    j += "\"out\":\"";
-    for (char c : s.out_text) {
-        if (c == '"' || c == '\\') { j += '\\'; j += c; }
-        else if ((unsigned char)c >= 32) j += c;
+    auto esc = [](const std::string& in) {
+        std::string o;
+        for (char c : in) {
+            if (c == '"' || c == '\\') { o += '\\'; o += c; }
+            else if ((unsigned char)c >= 32) o += c;
+        }
+        return o;
+    };
+
+    j += "\"out\":\"" + esc(s.out_text) + "\",";
+
+    snprintf(buf, sizeof buf, "\"wtotal\":%lld,\"wscored\":%lld,\"wavg\":%.2f,",
+             (long long)s.words_total, (long long)s.words_scored, s.avg_score);
+    j += buf;
+
+    j += "\"words\":[";
+    for (size_t i = 0; i < s.words.size(); ++i) {
+        const OutWord& w = s.words[i];
+        snprintf(buf, sizeof buf, "%s{\"id\":%u,\"t\":%.1f,\"s\":%d,\"d\":%s,\"w\":\"",
+                 i ? "," : "", w.id, w.t, w.score, w.scored ? "1" : "0");
+        j += buf; j += esc(w.text); j += "\"}";
     }
-    j += "\"}";
+    j += "],\"chat\":[";
+    for (size_t i = 0; i < s.chat.size(); ++i) {
+        const ChatMsg& m = s.chat[i];
+        snprintf(buf, sizeof buf, "%s{\"id\":%u,\"t\":%.1f,\"h\":%s,\"m\":\"",
+                 i ? "," : "", m.id, m.t, m.from_human ? "1" : "0");
+        j += buf; j += esc(m.text); j += "\"}";
+    }
+    j += "]}";
     return j;
 }
 
@@ -1491,6 +1802,28 @@ static void http_server(int port) {
             g_speed.store(qparam(R, "v", 1000)); body = "{\"ok\":1}";
         } else if (R.rfind("GET /temp", 0) == 0) {
             B.temperature.store(std::max(0, std::min(255, qparam(R, "v", 100)))); body = "{\"ok\":1}";
+        } else if (R.rfind("GET /score", 0) == 0) {
+            int id = qparam(R, "id", 0), sc = qparam(R, "s", 0);
+            if (id) device_score((u32)id, sc);
+            body = "{\"ok\":1}";
+        } else if (R.rfind("GET /say", 0) == 0) {
+            // متن به‌صورت URL-encoded در پارامتر t
+            std::string t;
+            size_t p = R.find("t=");
+            if (p != std::string::npos) {
+                size_t e = R.find_first_of(" &", p);
+                std::string raw = R.substr(p + 2, e == std::string::npos ? std::string::npos : e - p - 2);
+                for (size_t i = 0; i < raw.size(); ++i) {
+                    if (raw[i] == '%' && i + 2 < raw.size()) {
+                        int hi = raw[i+1], lo = raw[i+2];
+                        auto hv = [](int c){ return c<='9'?c-'0':(c|32)-'a'+10; };
+                        t += (char)((hv(hi) << 4) | hv(lo)); i += 2;
+                    } else if (raw[i] == '+') t += ' ';
+                    else t += raw[i];
+                }
+            }
+            if (!t.empty()) device_say(t);
+            body = "{\"ok\":1}";
         } else if (R.rfind("GET /reward", 0) == 0) {
             g_reward_pending.fetch_add(qparam(R, "v", 0)); body = "{\"ok\":1}";
         } else if (R.rfind("GET /shutdown", 0) == 0) {
