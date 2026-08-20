@@ -75,10 +75,10 @@ static const int  KIND_FUEL[3]  = { 64,   512,   8192 };      // بند ۹٫۱
 static const vtime KIND_CADENCE[3] = { 10*MS, 15*MS, 50*MS };
 
 // --- اقتصاد (بند ۵) ---------------------------------------------------------
-static constexpr i64 FIRE_STARTUP   = 500;        // ۰٫۵ مانا  — هزینه‌ی راه‌اندازی
-static constexpr i64 FIRE_PER_LINE  = 200;        // ۰٫۲ مانا  — هر خط
+static constexpr i64 FIRE_STARTUP   = 1200;       // ۱٫۲ مانا  — هزینه‌ی راه‌اندازی
+static constexpr i64 FIRE_PER_LINE  = 300;        // ۰٫۳ مانا  — هر خط
 static constexpr vtime TRANSIT_TIME = SEC / 2;    // بازگشت مانای سوخته
-static constexpr i64 BASE_INCOME    = 500;        // ۰٫۵ مانا بر نورون بر ثانیه
+static constexpr i64 BASE_INCOME    = 260;        // زیر هزینه‌ی زنده‌ماندن → کمبود واقعی
 static constexpr i64 UPKEEP_PCT     = 20;         // ۲٪ سقف در ثانیه (‰)
 static constexpr i64 LEAK_BACK      = 50;         // ۵۰٪ نشت به عقب
 static constexpr i64 LEAK_FWD       = 10;         // ۱۰٪ نشت به جلو
@@ -92,6 +92,7 @@ static constexpr i64 DEATH_CAP_PPT   = 1;         // سقف نرخ مرگ ۰٫۱
 static constexpr vtime DORMANT_TIME  = 30 * SEC;  // خواب زمستانی
 
 // --- زمان‌بندی --------------------------------------------------------------
+static constexpr vtime REFRACTORY = 40 * MS;      // دوره‌ی تعلیق پس از هر فایر (ضد اسپم)
 static constexpr vtime SYS_TICK   = 50 * MS;      // سیستم‌تیک: درآمد، مالیات، مرگ
 static constexpr vtime EDGE_MIN   = 1 * MS;
 static constexpr vtime EDGE_MAX   = 20 * MS;
@@ -316,6 +317,9 @@ struct Brain {
     double               score_sum    = 0;
 
     // --- دستگاه: بخش حواس (ورودی انسان → مغز) ---
+    std::string     utf8_buf;             // بافر دنباله‌ی UTF-8
+    int             utf8_need = 0;        // چند بایت ادامه لازم است
+    i64             chars_ok = 0, chars_bad = 0;
     std::deque<u8>  in_queue;             // بیت‌های منتظر تزریق
     std::deque<u8>  mirror_queue;         // آینه: خروجی خودش با تأخیر
     vtime           next_inject = 0;
@@ -760,7 +764,7 @@ static void build_brain(int N, u64 seed) {
     for (int L = 0; L < N_LOBES; ++L) { B.lp[L] = LobePool{}; }
     for (auto& nu : B.n) { B.lp[nu.lobe].alive++; B.lp[nu.lobe].cap_sum += nu.cap; }
     for (int L = 0; L < N_LOBES; ++L) {
-        B.lp[L].target = B.lp[L].cap_sum * 3 / 2;      // هدف = ۱٫۵ برابر مجموع مخازن
+        B.lp[L].target = B.lp[L].cap_sum * 3 / 5;      // هدف = ۰٫۶ برابر — کمیابی واقعی
         B.lp[L].pool   = B.lp[L].target / 2;
     }
     B.treasury = 0;
@@ -789,7 +793,7 @@ static void draw_from_pool(Neuron& nu) {
     if (want <= 0 || L.pool <= 0) return;
     i64 got = std::min(want, L.pool);
     // سهم به نسبت اعتبار: نورون بی‌اعتبار کندتر پر می‌شود (بند ۵٫۳)
-    i64 share = 40 + std::min<i64>(60, (i64)nu.credit / 256);   // ۴۰٪..۱۰۰٪
+    i64 share = 15 + std::min<i64>(85, (i64)nu.credit / 180);   // ۱۵٪..۱۰۰٪ — اعتبار تعیین‌کننده
     got = got * share / 100;
     if (got <= 0) return;
     L.pool  -= got;
@@ -939,7 +943,10 @@ static void neuron_eval(u32 id) {
     }
     if (res.sleep) { B.push(B.now + cadence * 3, id, EV_EVAL); return; }
 
-    if (res.fired && res.mask) {
+    // دوره‌ی تعلیق: نورون بلافاصله پس از فایر نمی‌تواند دوباره شلیک کند
+    bool refractory = (nu.last_fire >= 0 && B.now - nu.last_fire < REFRACTORY);
+
+    if (res.fired && res.mask && !refractory) {
         int nl  = nu.lines();
         int cnt = __builtin_popcountll(res.mask);
         i64 cost = FIRE_STARTUP + FIRE_PER_LINE * cnt;     // بند ۲٫۴
@@ -1012,7 +1019,7 @@ static void system_tick() {
         i64 income = P.cap_sum * BASE_INCOME / (20 * MANA) * SYS_TICK / SEC;
         // جبران گرسنگی: هرچه استخر خالی‌تر، درآمد بیشتر (تا ۴ برابر)
         double f = (double)P.pool / std::max<i64>(1, P.target);
-        if (f < 0.5) income = (i64)(income * (1.0 + 3.0 * (0.5 - f) / 0.5));
+        if (f < 0.25) income = (i64)(income * (1.0 + 0.5 * (0.25 - f) / 0.25));
         if (P.emergency) income *= 3;
         // هومئوستاز: خزانه فقط تا سقف هدف پر می‌کند — جلوگیری از تورم
         i64 room = P.target - P.pool;
@@ -1023,7 +1030,7 @@ static void system_tick() {
     // --- سقف نرخ مرگ (بند ۶) ---
     for (int L = 0; L < N_LOBES; ++L) {
         LobePool& P = B.lp[L];
-        P.target = std::max<i64>(1, P.cap_sum * 3 / 2);
+        P.target = std::max<i64>(1, P.cap_sum * 3 / 5);
         i64 cap_deaths = std::max<i64>(1, P.alive * DEATH_CAP_PPT / 1000);
         P.emergency = (P.deaths_window > cap_deaths);
         P.deaths_window = 0;
@@ -1044,6 +1051,20 @@ static void system_tick() {
 //  دستگاه — بخش زبان: بیت → بایت → کلمه (بند ۱۱٫۱)
 //  فاصله جداکننده‌ی کلمات است و به کلمه‌ی قبلش می‌چسبد.
 // ---------------------------------------------------------------------------
+// بستن کلمه‌ی جاری و فرستادنش برای نمره‌دهی
+static void device_close_word() {
+    if (B.cur_word.empty()) return;
+    OutWord w;
+    w.id = B.next_word_id++;
+    w.text = B.cur_word + " ";           // فاصله به کلمه می‌چسبد (بند ۱۱٫۱)
+    w.t = (double)B.now / SEC;
+    w.score = 0; w.scored = false;
+    B.words.push_back(w);
+    B.words_total++;
+    if (B.words.size() > 250) B.words.erase(B.words.begin());
+    B.cur_word.clear();
+}
+
 static void device_decode() {
     while (B.out_bits.size() >= 8) {
         u8 byte = 0;
@@ -1053,41 +1074,44 @@ static void device_decode() {
         // آینه: هرچه گفت با تأخیر به نیمه‌ی ب لوب ورودی برمی‌گردد (بند ۴)
         for (int i = 7; i >= 0; --i) B.mirror_queue.push_back((u8)((byte >> i) & 1));
 
-        bool is_space = (byte == 32 || byte == 10 || byte == 13 || byte == 9);
-        bool printable = (byte >= 32 && byte < 127);
-
-        if (is_space) {
-            if (!B.cur_word.empty()) {
-                B.cur_word.push_back(' ');            // فاصله به کلمه می‌چسبد
-                OutWord w;
-                w.id = B.next_word_id++;
-                w.text = B.cur_word;
-                w.t = (double)B.now / SEC;
-                w.score = 0; w.scored = false;
-                B.words.push_back(w);
-                B.words_total++;
-                if (B.words.size() > 250) B.words.erase(B.words.begin());
-                B.cur_word.clear();
+        // ---- رمزگشای UTF-8 چندبایتی (اصلاح: فارسی دوبایتی است) ----
+        if (B.utf8_need > 0) {
+            if ((byte & 0xC0) == 0x80) {                 // بایت ادامه معتبر
+                B.utf8_buf.push_back((char)byte);
+                if (--B.utf8_need == 0) {
+                    B.cur_word += B.utf8_buf;
+                    B.out_text += B.utf8_buf;
+                    B.utf8_buf.clear();
+                    B.chars_ok++;
+                    if (B.cur_word.size() >= 16) device_close_word();
+                }
+                continue;
             }
-        } else if (printable) {
-            B.cur_word.push_back((char)byte);
-            // کلمه‌ی بیش از حد بلند را می‌بندیم تا نمره‌دهی ممکن بماند
-            if (B.cur_word.size() >= 24) {
-                OutWord w;
-                w.id = B.next_word_id++;
-                w.text = B.cur_word;
-                w.t = (double)B.now / SEC;
-                w.score = 0; w.scored = false;
-                B.words.push_back(w);
-                B.words_total++;
-                if (B.words.size() > 250) B.words.erase(B.words.begin());
-                B.cur_word.clear();
-            }
+            B.utf8_buf.clear(); B.utf8_need = 0;          // دنباله‌ی خراب
+            B.chars_bad++;
         }
 
-        if (printable) B.out_text.push_back((char)byte);
+        if (byte < 0x80) {
+            // ---- ASCII ----
+            bool is_space = (byte == 32 || byte == 10 || byte == 13 || byte == 9);
+            if (is_space) { device_close_word(); B.out_text.push_back(' '); }
+            else if (byte >= 32) {
+                B.cur_word.push_back((char)byte);
+                B.out_text.push_back((char)byte);
+                B.chars_ok++;
+                if (B.cur_word.size() >= 16) device_close_word();
+            } else B.chars_bad++;
+        } else if ((byte & 0xE0) == 0xC0) {
+            B.utf8_buf.assign(1, (char)byte); B.utf8_need = 1;   // دوبایتی (فارسی)
+        } else if ((byte & 0xF0) == 0xE0) {
+            B.utf8_buf.assign(1, (char)byte); B.utf8_need = 2;
+        } else if ((byte & 0xF8) == 0xF0) {
+            B.utf8_buf.assign(1, (char)byte); B.utf8_need = 3;
+        } else {
+            B.chars_bad++;                                        // بایت نامعتبر
+        }
     }
-    if (B.out_text.size() > 400) B.out_text.erase(0, B.out_text.size() - 400);
+    if (B.out_text.size() > 600) B.out_text.erase(0, B.out_text.size() - 600);
 }
 
 // ---------------------------------------------------------------------------
@@ -1229,7 +1253,7 @@ static bool load_brain(const char* path) {
         fread(&B.lp[L].alive,8,1,f);
         B.lp[L].cap_sum = 0;
         for (auto& nu : B.n) if (nu.state != S_DEAD && nu.lobe == L) B.lp[L].cap_sum += nu.cap;
-        B.lp[L].target = std::max<i64>(1, B.lp[L].cap_sum * 3 / 2);
+        B.lp[L].target = std::max<i64>(1, B.lp[L].cap_sum * 3 / 5);
     }
     fclose(f);
     while (!B.q.empty()) B.q.pop();
