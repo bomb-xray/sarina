@@ -239,6 +239,8 @@ struct LobePool {
     i64 cap_sum  = 0;                 // مجموع سقف مانای نورون‌های زنده
     i64 deaths_window = 0;
     bool emergency = false;
+    vtime penalty_until = 0;      // تا این زمان درآمد پایه کم است (بند ۲۱)
+    vtime boost_until   = 0;      // تا این زمان درآمد پایه بیشتر است
 };
 
 // --- دستگاه: کلمه‌ی خروجی که منتظر نمره است (بند ۱۱٫۲) ---
@@ -808,9 +810,15 @@ static void burn(i64 amount) {                 // مانا می‌سوزد و پ
 
 static void apply_reward(i64 milli) {          // پاداش/تنبیه از دستگاه (بند ۵٫۳)
     if (milli == 0) return;
-    // فشرده‌سازی لگاریتمی + کف حیاتی (بند ۱۱٫۲)
-    double s = (double)milli;
-    double c = (s >= 0 ? 1.0 : -1.0) * std::log(1.0 + std::fabs(s) / MANA) * 3.0 * MANA;
+    // فشرده‌سازی لگاریتمی + مقیاس نسبت به اندازه‌ی لوب (بند ۱۱٫۲)
+    //
+    // اصلاح مرحله‌ی ۰: پیش‌تر ضریب ثابت ۳ بود، یعنی نمره‌ی −۱۰ فقط ۷ مانا
+    // می‌شد — در برابر استخر ۱۱٬۸۸۰ مانا حدود ۰٫۰۶٪، که درآمد پایه در
+    // یک‌دهم ثانیه جبرانش می‌کرد. حالا اثر نمره با اندازه‌ی لوب مقیاس
+    // می‌گیرد: یک نمره‌ی ±۱۰ حدود ۱۵٪ استخر لوب پایانی را جابه‌جا می‌کند.
+    double s   = (double)milli;
+    double mag = std::log(1.0 + std::fabs(s) / MANA) / std::log(11.0);   // ±۱۰ → ۱٫۰
+    double c   = (s >= 0 ? 1.0 : -1.0) * mag * (double)B.lp[L_OUTPUT].target * 0.40;
     i64 v = (i64)c;
 
     // نشت خودتنظیم (بند ۵٫۳): استخر گرسنه بیشتر می‌مکد
@@ -826,6 +834,20 @@ static void apply_reward(i64 milli) {          // پاداش/تنبیه از د�
     B.lp[L_OUTPUT].pool  += to_out;
     B.lp[L_CENTRAL].pool += back1;
     B.lp[L_INPUT].pool   += back2 + fwd;
+
+    // تنبیه فقط استخر را خالی نمی‌کند؛ درآمد پایه را هم موقتاً قطع می‌کند،
+    // وگرنه در کسری از ثانیه جبران می‌شود و بی‌اثر می‌ماند.
+    if (v > 0) {
+        // پاداش هم ماندگار است: لوب‌های عقب برای مدتی درآمد بیشتری می‌گیرند
+        vtime bd = (vtime)(8.0 * SEC * mag);
+        B.lp[L_INPUT].boost_until   = std::max(B.lp[L_INPUT].boost_until,   B.now + bd);
+        B.lp[L_CENTRAL].boost_until = std::max(B.lp[L_CENTRAL].boost_until, B.now + bd);
+    }
+    if (v < 0) {
+        vtime dur = (vtime)(12.0 * SEC * mag);
+        B.lp[L_OUTPUT].penalty_until  = std::max(B.lp[L_OUTPUT].penalty_until,  B.now + dur);
+        B.lp[L_CENTRAL].penalty_until = std::max(B.lp[L_CENTRAL].penalty_until, B.now + dur / 2);
+    }
 
     // کف حیاتی: تنبیه نمی‌تواند استخر را زیر ۵٪ هدف ببرد (بند ۱۱٫۲)
     for (int L = 0; L < N_LOBES; ++L) {
@@ -1017,6 +1039,7 @@ static void system_tick() {
             while (spill > 0) {
                 int hungriest = 0; double worst = 2.0;
                 for (int L = 0; L < N_LOBES; ++L) {
+                    if (B.now < B.lp[L].penalty_until) continue;   // در دوره‌ی بدهی
                     double f = (double)B.lp[L].pool / std::max<i64>(1, B.lp[L].target);
                     if (f < worst) { worst = f; hungriest = L; }
                 }
@@ -1037,6 +1060,8 @@ static void system_tick() {
     for (int L = 0; L < N_LOBES; ++L) {
         LobePool& P = B.lp[L];
         i64 income = P.cap_sum * BASE_INCOME / (20 * MANA) * SYS_TICK / SEC;
+        if (B.now < P.penalty_until)   income /= 40;   // دوره‌ی بدهی پس از تنبیه
+        else if (B.now < P.boost_until) income *= 3;   // دوره‌ی رونق پس از پاداش
         // جبران گرسنگی: هرچه استخر خالی‌تر، درآمد بیشتر (تا ۴ برابر)
         double f = (double)P.pool / std::max<i64>(1, P.target);
         if (f < 0.25) income = (i64)(income * (1.0 + 0.5 * (0.25 - f) / 0.25));
@@ -1051,7 +1076,7 @@ static void system_tick() {
     for (int L = N_LOBES - 1; L > 0; --L) {
         LobePool& hi = B.lp[L];
         LobePool& lo = B.lp[L - 1];
-        if (hi.pool > hi.target) {
+        if (hi.pool > hi.target && B.now >= lo.penalty_until) {
             i64 over = hi.pool - hi.target;
             i64 give = over / 2;                 // نیمی سرریز، نیمی می‌ماند
             hi.pool -= give;
