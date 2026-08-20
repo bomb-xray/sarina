@@ -358,12 +358,12 @@ static std::vector<u32> seed_normal(int thresh, int width, int greed) {
     c.push_back(enc(OP_SENSE, 6, 0, SN_INBITS));      // r6 = الگوی بیت ورودی
 
     // --- برانگیختگی: ورودی + تازگی + نویز + بی‌قراری ---
-    c.push_back(enc(OP_MUL, 7, 1, IM(24)));
-    c.push_back(enc(OP_MUL, 8, 2, IM(40)));
+    c.push_back(enc(OP_MUL, 7, 1, IM(40)));           // ورودی: وزن بالا
+    c.push_back(enc(OP_MUL, 8, 2, IM(55)));           // تازگی: وزن بالاتر
     c.push_back(enc(OP_ADD, 7, 7, RG(8)));
-    c.push_back(enc(OP_DIV, 8, 3, IM(6)));
+    c.push_back(enc(OP_DIV, 8, 3, IM(18)));           // نویز: فقط تلنگر (۱/۳ قبل)
     c.push_back(enc(OP_ADD, 7, 7, RG(8)));
-    c.push_back(enc(OP_DIV, 8, 5, IM(40)));
+    c.push_back(enc(OP_DIV, 8, 5, IM(120)));          // بی‌قراری: کند
     c.push_back(enc(OP_ADD, 7, 7, RG(8)));            // r7 = برانگیختگی
 
     // --- تصمیم فایر: برانگیخته و پول‌دار ---
@@ -943,8 +943,11 @@ static void neuron_eval(u32 id) {
     }
     if (res.sleep) { B.push(B.now + cadence * 3, id, EV_EVAL); return; }
 
-    // دوره‌ی تعلیق: نورون بلافاصله پس از فایر نمی‌تواند دوباره شلیک کند
-    bool refractory = (nu.last_fire >= 0 && B.now - nu.last_fire < REFRACTORY);
+    // دوره‌ی تعلیق: نورون بلافاصله پس از فایر نمی‌تواند دوباره شلیک کند.
+    // لوب پایانی تعلیق بلندتری دارد — هر فایرش یک نماد خروجی است، پس
+    // حرف زدن باید تصمیم باشد نه بازتاب.
+    vtime refr = (nu.lobe == L_OUTPUT) ? REFRACTORY * 6 : REFRACTORY;
+    bool refractory = (nu.last_fire >= 0 && B.now - nu.last_fire < refr);
 
     if (res.fired && res.mask && !refractory) {
         int nl  = nu.lines();
@@ -973,7 +976,7 @@ static void neuron_eval(u32 id) {
             if (nu.lobe == L_OUTPUT) {
                 int l0 = nl - 2, l1 = nl - 1;
                 bool a0 = (res.mask >> l0) & 1, a1 = (res.mask >> l1) & 1;
-                if (a0 || a1) {
+                if (a0 || a1) {          // یکی از دو خط پایانی کافی است
                     B.out_bits.push_back((u8)((res.bits >> l0) & 1));
                     B.out_bits.push_back((u8)((res.bits >> l1) & 1));
                 }
@@ -999,13 +1002,30 @@ static void system_tick() {
         // بازگشت به نسبت ظرفیت، ولی هرگز فراتر از هدف — مازاد به خزانه (ضدتورم)
         i64 tot = B.lp[0].cap_sum + B.lp[1].cap_sum + B.lp[2].cap_sum;
         if (tot > 0) {
+            i64 spill = 0;
             for (int L = 0; L < N_LOBES; ++L) {
                 i64 part = amt * B.lp[L].cap_sum / tot;
                 i64 room = B.lp[L].target - B.lp[L].pool;
                 if (room < 0) room = 0;
                 i64 give = std::min(part, room);
                 B.lp[L].pool += give;
-                B.treasury   += part - give;
+                spill        += part - give;      // مازاد لوب‌های سیر
+            }
+            // مازاد به گرسنه‌ترین لوب می‌رود، نه به خزانه.
+            // پیش‌تر به خزانه می‌رفت و هرگز خرج نمی‌شد — یک نشت واقعی
+            // که کل اقتصاد را خشک می‌کرد (لوب ورودی/مرکزی روی ۱٪ گیر می‌کردند).
+            while (spill > 0) {
+                int hungriest = 0; double worst = 2.0;
+                for (int L = 0; L < N_LOBES; ++L) {
+                    double f = (double)B.lp[L].pool / std::max<i64>(1, B.lp[L].target);
+                    if (f < worst) { worst = f; hungriest = L; }
+                }
+                if (worst >= 1.0) { B.treasury += spill; break; }
+                i64 room = B.lp[hungriest].target - B.lp[hungriest].pool;
+                i64 give = std::min(spill, room > 0 ? room : 0);
+                if (give <= 0) { B.treasury += spill; break; }
+                B.lp[hungriest].pool += give;
+                spill -= give;
             }
         } else B.treasury += amt;
     }
@@ -1025,6 +1045,18 @@ static void system_tick() {
         i64 room = P.target - P.pool;
         if (room < 0) room = 0;
         P.pool += std::min(income, room);
+    }
+
+    // --- سرریز به عقب: استخر پر، مازادش را به لوب عقبی می‌دهد (بند ۵٫۳) ---
+    for (int L = N_LOBES - 1; L > 0; --L) {
+        LobePool& hi = B.lp[L];
+        LobePool& lo = B.lp[L - 1];
+        if (hi.pool > hi.target) {
+            i64 over = hi.pool - hi.target;
+            i64 give = over / 2;                 // نیمی سرریز، نیمی می‌ماند
+            hi.pool -= give;
+            lo.pool += give;
+        }
     }
 
     // --- سقف نرخ مرگ (بند ۶) ---
@@ -1051,6 +1083,31 @@ static void system_tick() {
 //  دستگاه — بخش زبان: بیت → بایت → کلمه (بند ۱۱٫۱)
 //  فاصله جداکننده‌ی کلمات است و به کلمه‌ی قبلش می‌چسبد.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+//  الفبای خروجی — ۶ بیت = ۶۴ نماد، همه فارسیِ معتبر (بند ۱۱٫۱)
+//
+//  چرا نه بایت خام UTF-8؟ چون فارسی دوبایتی است و شانس آماری‌اش در برابر
+//  ASCII حدود ۱ به ۱۲ است — به‌علاوه باید دو بایت مشخص پشت هم بیایند.
+//  با الفبای مستقیم، هر خروجیِ مدل از روز اول فارسیِ خواناست.
+// ---------------------------------------------------------------------------
+static const char* PERSIAN_ALPHABET[64] = {
+    " ", "ا", "ب", "پ", "ت", "ث", "ج", "چ",
+    "ح", "خ", "د", "ذ", "ر", "ز", "ژ", "س",
+    "ش", "ص", "ض", "ط", "ظ", "ع", "غ", "ف",
+    "ق", "ک", "گ", "ل", "م", "ن", "و", "ه",
+    "ی", "آ", "أ", "ؤ", "ئ", "ة", "ء", "،",
+    ".", "؟", "!", ":", "؛", "-", "«", "»",
+    "۰", "۱", "۲", "۳", "۴", "۵", "۶", "۷",
+    "۸", "۹", " ", " ", " ", " ", " ", " "
+};
+
+// نگاشت معکوس برای ورودی انسان
+static int persian_index(const std::string& ch) {
+    for (int i = 0; i < 64; ++i)
+        if (ch == PERSIAN_ALPHABET[i]) return i;
+    return 0;   // ناشناخته → فاصله
+}
+
 // بستن کلمه‌ی جاری و فرستادنش برای نمره‌دهی
 static void device_close_word() {
     if (B.cur_word.empty()) return;
@@ -1066,52 +1123,30 @@ static void device_close_word() {
 }
 
 static void device_decode() {
-    while (B.out_bits.size() >= 8) {
-        u8 byte = 0;
-        for (int i = 0; i < 8; ++i) byte = (u8)((byte << 1) | B.out_bits[i]);
-        B.out_bits.erase(B.out_bits.begin(), B.out_bits.begin() + 8);
+    while (B.out_bits.size() >= 6) {
+        u8 sym = 0;
+        for (int i = 0; i < 6; ++i) sym = (u8)((sym << 1) | B.out_bits[i]);
+        B.out_bits.erase(B.out_bits.begin(), B.out_bits.begin() + 6);
 
         // آینه: هرچه گفت با تأخیر به نیمه‌ی ب لوب ورودی برمی‌گردد (بند ۴)
-        for (int i = 7; i >= 0; --i) B.mirror_queue.push_back((u8)((byte >> i) & 1));
+        for (int i = 5; i >= 0; --i) B.mirror_queue.push_back((u8)((sym >> i) & 1));
 
-        // ---- رمزگشای UTF-8 چندبایتی (اصلاح: فارسی دوبایتی است) ----
-        if (B.utf8_need > 0) {
-            if ((byte & 0xC0) == 0x80) {                 // بایت ادامه معتبر
-                B.utf8_buf.push_back((char)byte);
-                if (--B.utf8_need == 0) {
-                    B.cur_word += B.utf8_buf;
-                    B.out_text += B.utf8_buf;
-                    B.utf8_buf.clear();
-                    B.chars_ok++;
-                    if (B.cur_word.size() >= 16) device_close_word();
-                }
-                continue;
-            }
-            B.utf8_buf.clear(); B.utf8_need = 0;          // دنباله‌ی خراب
-            B.chars_bad++;
-        }
+        const char* g = PERSIAN_ALPHABET[sym & 63];
+        B.chars_ok++;
 
-        if (byte < 0x80) {
-            // ---- ASCII ----
-            bool is_space = (byte == 32 || byte == 10 || byte == 13 || byte == 9);
-            if (is_space) { device_close_word(); B.out_text.push_back(' '); }
-            else if (byte >= 32) {
-                B.cur_word.push_back((char)byte);
-                B.out_text.push_back((char)byte);
-                B.chars_ok++;
-                if (B.cur_word.size() >= 16) device_close_word();
-            } else B.chars_bad++;
-        } else if ((byte & 0xE0) == 0xC0) {
-            B.utf8_buf.assign(1, (char)byte); B.utf8_need = 1;   // دوبایتی (فارسی)
-        } else if ((byte & 0xF0) == 0xE0) {
-            B.utf8_buf.assign(1, (char)byte); B.utf8_need = 2;
-        } else if ((byte & 0xF8) == 0xF0) {
-            B.utf8_buf.assign(1, (char)byte); B.utf8_need = 3;
+        if (g[0] == ' ') {                       // فاصله → پایان کلمه
+            device_close_word();
+            B.out_text += " ";
         } else {
-            B.chars_bad++;                                        // بایت نامعتبر
+            B.cur_word += g;
+            B.out_text += g;
+            int letters = 0;                     // شمارش حرف، نه بایت
+            for (size_t k = 0; k < B.cur_word.size(); ++k)
+                if ((B.cur_word[k] & 0xC0) != 0x80) ++letters;
+            if (letters >= 10) device_close_word();
         }
     }
-    if (B.out_text.size() > 600) B.out_text.erase(0, B.out_text.size() - 600);
+    if (B.out_text.size() > 900) B.out_text.erase(0, B.out_text.size() - 900);
 }
 
 // ---------------------------------------------------------------------------
@@ -1127,10 +1162,20 @@ static void device_say(const std::string& text) {
     B.chat.push_back(m);
     if (B.chat.size() > 120) B.chat.erase(B.chat.begin());
 
-    for (unsigned char ch : text)
-        for (int i = 7; i >= 0; --i) B.in_queue.push_back((u8)((ch >> i) & 1));
-    B.in_queue.push_back(0); B.in_queue.push_back(0);   // مکث
-    for (int i = 7; i >= 0; --i) B.in_queue.push_back((u8)((32 >> i) & 1)); // فاصله‌ی پایانی
+    // متن فارسی → نماد ۶ بیتی (معکوس همان الفبا)
+    size_t i = 0;
+    while (i < text.size()) {
+        size_t len = 1;
+        unsigned char c = (unsigned char)text[i];
+        if      ((c & 0xE0) == 0xC0) len = 2;
+        else if ((c & 0xF0) == 0xE0) len = 3;
+        else if ((c & 0xF8) == 0xF0) len = 4;
+        if (i + len > text.size()) break;
+        int idx = persian_index(text.substr(i, len));
+        for (int b = 5; b >= 0; --b) B.in_queue.push_back((u8)((idx >> b) & 1));
+        i += len;
+    }
+    for (int b = 5; b >= 0; --b) B.in_queue.push_back(0);   // فاصله‌ی پایانی
 }
 
 // تزریق بیت‌ها به دو خط پایانی نورون‌های نیمه‌ی مربوطه‌ی لوب ورودی
