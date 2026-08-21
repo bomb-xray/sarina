@@ -241,6 +241,7 @@ struct LobePool {
     bool emergency = false;
     vtime penalty_until = 0;      // تا این زمان درآمد پایه کم است (بند ۲۱)
     vtime boost_until   = 0;      // تا این زمان درآمد پایه بیشتر است
+    i64   burn_recent   = 0;      // مانای سوخته‌ی اخیر — سنجه‌ی تقاضا
 };
 
 // --- دستگاه: کلمه‌ی خروجی که منتظر نمره است (بند ۱۱٫۲) ---
@@ -978,6 +979,7 @@ static void neuron_eval(u32 id) {
         if (nu.mana >= cost) {
             nu.mana -= cost;
             burn(cost);
+            B.lp[nu.lobe].burn_recent += cost;
             nu.last_fire = B.now;
             nu.fires++; B.c_fires++;
             {   // اعتبار = سرمایه‌گذاری؛ اشباع در ۶۵۵۳۵
@@ -1027,6 +1029,13 @@ static void system_tick() {
             i64 spill = 0;
             for (int L = 0; L < N_LOBES; ++L) {
                 i64 part = amt * B.lp[L].cap_sum / tot;
+                // لوبِ در دوره‌ی بدهی، مانای بازگشتی نمی‌گیرد.
+                // بدون این، تنبیه در ۵ ثانیه شسته می‌شد و استخر از ۵٪
+                // مستقیم به ۱۰۰٪ می‌پرید — دقیقاً همان چیزی که دیده شد.
+                // مانای بازگشتیِ لوبِ تنبیه‌شده نه به خودش می‌رسد و نه به
+                // لوب دیگری منتقل می‌شود — واقعاً می‌سوزد. اگر منتقل می‌شد،
+                // تنبیه فقط ثروت را جابه‌جا می‌کرد نه اینکه درد بسازد.
+                if (B.now < B.lp[L].penalty_until) { B.treasury += part; continue; }
                 i64 room = B.lp[L].target - B.lp[L].pool;
                 if (room < 0) room = 0;
                 i64 give = std::min(part, room);
@@ -1059,28 +1068,58 @@ static void system_tick() {
     // ورشکسته‌ی ساختاری‌اند و می‌میرند — که در اولین اجرا دقیقاً رخ داد.
     for (int L = 0; L < N_LOBES; ++L) {
         LobePool& P = B.lp[L];
-        i64 income = P.cap_sum * BASE_INCOME / (20 * MANA) * SYS_TICK / SEC;
-        if (B.now < P.penalty_until)   income /= 40;   // دوره‌ی بدهی پس از تنبیه
-        else if (B.now < P.boost_until) income *= 3;   // دوره‌ی رونق پس از پاداش
-        // جبران گرسنگی: هرچه استخر خالی‌تر، درآمد بیشتر (تا ۴ برابر)
+        // --- درآمد پایه = نان شب، نه ثروت (اصلاح بند ۲۲) ---
+        // سقف معیشت: درآمد پایه فقط تا ۲۵٪ هدف کار می‌کند. بالاتر از آن،
+        // تنها پاداش می‌تواند استخر را پر کند. بدون این، شبکه بدون هیچ
+        // کاری در ۳۵ ثانیه به ۱۰۰٪ می‌رسید و نمره‌دهی بی‌معنا می‌شد.
+        // لوب ورودی ته زنجیره‌ی نشت است، پس سقف معیشتش بالاتر (بند ۵٫۳)
+        const double SUBSIST = (L == L_INPUT) ? 0.45 : 0.25;
         double f = (double)P.pool / std::max<i64>(1, P.target);
-        if (f < 0.25) income = (i64)(income * (1.0 + 0.5 * (0.25 - f) / 0.25));
+
+        i64 income = 0;
+        if (f < SUBSIST) {
+            // درآمد به تقاضای واقعی گره خورده، نه فقط ظرفیت.
+            // لوبی که خرج نمی‌کند (مثل لوب پایانیِ کم‌فایر) انباشت نمی‌کند.
+            i64 capbased = P.cap_sum * BASE_INCOME / (20 * MANA) * SYS_TICK / SEC;
+            i64 demand   = P.burn_recent * 2;
+            income = std::min(capbased, std::max(demand, capbased / 4));
+            income = (i64)(income * (1.0 + 2.0 * (SUBSIST - f) / SUBSIST));
+        }
+
+        if (B.now < P.penalty_until)    income /= 40;  // دوره‌ی بدهی پس از تنبیه
+        else if (B.now < P.boost_until) income *= 3;   // دوره‌ی رونق پس از پاداش
         if (P.emergency) income *= 3;
-        // هومئوستاز: خزانه فقط تا سقف هدف پر می‌کند — جلوگیری از تورم
-        i64 room = P.target - P.pool;
+
+        i64 ceil_ = (i64)(P.target * SUBSIST);
+        i64 room  = ceil_ - P.pool;
         if (room < 0) room = 0;
         P.pool += std::min(income, room);
+
+        P.burn_recent = P.burn_recent * 3 / 4;         // محو تدریجی تقاضا
     }
 
-    // --- سرریز به عقب: استخر پر، مازادش را به لوب عقبی می‌دهد (بند ۵٫۳) ---
+    // --- سرریز به عقب (بند ۵٫۳ + اصلاح ۲۲) ---
+    //
+    // پیش‌تر شرط `pool > target` بود، ولی استخر دقیقاً روی سقف بسته می‌شد،
+    // پس هرگز سرریز نمی‌کرد: لوب پایانی یک مخزن بن‌بست بود که روی ۱۰۰٪
+    // می‌ماند در حالی که لوب‌های عقب گرسنه بودند.
+    //
+    // حالا هر استخری که از ۷۰٪ هدف بگذرد، مازادش را رو به عقب می‌فرستد.
+    // مانا در سیستم می‌چرخد به‌جای اینکه در انتها تلنبار شود.
     for (int L = N_LOBES - 1; L > 0; --L) {
         LobePool& hi = B.lp[L];
         LobePool& lo = B.lp[L - 1];
-        if (hi.pool > hi.target && B.now >= lo.penalty_until) {
-            i64 over = hi.pool - hi.target;
-            i64 give = over / 2;                 // نیمی سرریز، نیمی می‌ماند
-            hi.pool -= give;
-            lo.pool += give;
+        // لوبی که خودش تنبیه شده، نه سرریز می‌کند نه سرریز می‌گیرد —
+        // وگرنه تنبیه در دو ثانیه شسته می‌شود.
+        i64 spill_from = hi.target * 2 / 5;
+        if (B.now < hi.penalty_until) continue;
+        if (hi.pool > spill_from && B.now >= lo.penalty_until) {
+            i64 over = hi.pool - spill_from;
+            i64 give = over / 2;                 // یک‌سوم در هر تیک — جریان نرم
+            i64 room = lo.target - lo.pool;
+            if (room < 0) room = 0;
+            give = std::min(give, room);
+            if (give > 0) { hi.pool -= give; lo.pool += give; }
         }
     }
 
