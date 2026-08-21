@@ -1591,6 +1591,7 @@ input[type=range]{width:130px;vertical-align:middle}
 <header>
   <h1>سارینا</h1>
   <span class="tag">مرحله‌ی صفر</span>
+  <span class="tag" title="تاریخ کامپایل — اگر قدیمی است، دوباره بساز">بیلد )HTML" __DATE__ " " __TIME__ R"HTML(</span>
   <span class="tag" id="vt">—</span>
   <span style="flex:1"></span>
   <button id="pause">توقف</button>

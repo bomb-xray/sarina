@@ -17,7 +17,7 @@ try {
     chcp 65001 > $null
 } catch { }
 
-$ScriptVersion = '2.2'
+$ScriptVersion = '2.3'
 $Branch  = 'arena/01a00c33-sarina'
 $RawBase = "https://raw.githubusercontent.com/bomb-xray/sarina/$Branch"
 $Dir     = Join-Path $env:USERPROFILE 'sarina'
@@ -138,7 +138,19 @@ if ($gpp) {
 # --- ۴. کامپایل -------------------------------------------------------------
 Step 4 'کامپایل (۱۰ تا ۳۰ ثانیه)'
 $exe = Join-Path $Dir 'sarina.exe'
-if (Test-Path $exe) { Remove-Item $exe -Force -ErrorAction SilentlyContinue }
+
+# نمونه‌ی در حال اجرا را ببند، وگرنه فایل exe قفل است و کامپایل جدید
+# بی‌صدا شکست می‌خورد — و کاربر همان نسخه‌ی قدیمی را می‌بیند.
+Get-Process sarina -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep -Milliseconds 600
+
+if (Test-Path $exe) {
+    Remove-Item $exe -Force -ErrorAction SilentlyContinue
+    if (Test-Path $exe) {
+        Fail 'فایل sarina.exe قفل است. پنجره‌ی سارینا را ببندید و دوباره اجرا کنید.'
+        return
+    }
+}
 
 $log = Join-Path $env:TEMP 'sarina_build.txt'
 
@@ -161,6 +173,7 @@ if (-not (Test-Path $exe)) {
     return
 }
 Ok ("sarina.exe ساخته شد ({0} KB)" -f [math]::Round((Get-Item $exe).Length / 1KB, 0))
+Ok ("زمان بیلد: {0}" -f (Get-Item $exe).LastWriteTime.ToString('HH:mm:ss'))
 
 # --- ۵. اجرا ----------------------------------------------------------------
 Step 5 "اجرا روی پورت $Port"
