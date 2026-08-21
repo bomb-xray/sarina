@@ -22,7 +22,7 @@ $Branch  = 'arena/01a00c33-sarina'
 $RawBase = "https://raw.githubusercontent.com/bomb-xray/sarina/$Branch"
 $Dir     = Join-Path $env:USERPROFILE 'sarina'
 $Port    = 8420
-$Neurons = 5000
+$Neurons = 32000
 
 function Step($n, $t) { Write-Host "  [$n/5] $t" -ForegroundColor Cyan }
 function Ok($t)       { Write-Host "        $t" -ForegroundColor Green }

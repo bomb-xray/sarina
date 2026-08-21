@@ -179,6 +179,7 @@ struct Neuron {
     u8   lobe   = L_CENTRAL;
     u8   state  = S_HEALTHY;
     u8   half   = 0;                 // نیمه‌ی الف/ب لوب ورودی
+    u8   is_mouth = 0;               // آیا به خروجی واقعی وصل است؟ (بند ۲۴)
     i32  x = 0, y = 0;               // مختصات — برای سیم‌کشی محلی‌گرا (بند ۱۲٫۳)
 
     i64  mana     = 0;               // میلی‌مانا
@@ -714,6 +715,19 @@ static void build_brain(int N, u64 seed) {
     }
     for (int i = 0; i < n_giant; ++i) add(K_GIANT, L_CENTRAL, 0);
 
+    // --- انتخاب «دهان»: قیف خروجی (بند ۲۴) ---
+    // حدود ۳٪ لوب پایانی به خروجی واقعی وصل می‌شود، با کف ۸ و سقف ۴۰.
+    {
+        std::vector<u32> outs;
+        for (auto& nu : B.n) if (nu.lobe == L_OUTPUT) outs.push_back(nu.id);
+        size_t want = std::min<size_t>(40, std::max<size_t>(8, outs.size() * 3 / 100));
+        for (size_t k = 0; k < want && !outs.empty(); ++k) {
+            size_t j = R.below((u32)outs.size());
+            B.n[outs[j]].is_mouth = 1;
+            outs.erase(outs.begin() + j);
+        }
+    }
+
     // --- سیم‌کشی محلی‌گرا (بند ۱۲٫۳): ~۹۰٪ کوتاه، ~۱۰٪ دوربرد ---
     std::vector<u32> idx_mem, idx_giant;
     for (auto& nu : B.n) {
@@ -973,7 +987,7 @@ static void neuron_eval(u32 id) {
     // دوره‌ی تعلیق: نورون بلافاصله پس از فایر نمی‌تواند دوباره شلیک کند.
     // لوب پایانی تعلیق بلندتری دارد — هر فایرش یک نماد خروجی است، پس
     // حرف زدن باید تصمیم باشد نه بازتاب.
-    vtime refr = (nu.lobe == L_OUTPUT) ? REFRACTORY * 6 : REFRACTORY;
+    vtime refr = nu.is_mouth ? REFRACTORY * 12 : REFRACTORY;
     bool refractory = (nu.last_fire >= 0 && B.now - nu.last_fire < refr);
 
     if (res.fired && res.mask && !refractory) {
@@ -1000,8 +1014,10 @@ static void neuron_eval(u32 id) {
                 }
             }
             // خروجی لوب پایانی → دستگاه (بند ۱۱٫۱)
-            // ۲ خط پایانی هر نورون خروجی، به خروجی واقعی تبدیل می‌شود.
-            if (nu.lobe == L_OUTPUT) {
+            // فقط «نورون‌های دهان» به خروجی واقعی وصل‌اند — نه کل لوب.
+            // بدون این، ۹۹۰ نورون × ۱٫۵ هرتز = ۱۴۵ کلمه در ثانیه تولید
+            // می‌شد که هیچ انسانی نمی‌تواند نمره‌اش بدهد (بند ۲۴).
+            if (nu.lobe == L_OUTPUT && nu.is_mouth) {
                 int l0 = nl - 2, l1 = nl - 1;
                 bool a0 = (res.mask >> l0) & 1, a1 = (res.mask >> l1) & 1;
                 if (a0 || a1) {          // یکی از دو خط پایانی کافی است
@@ -1306,6 +1322,7 @@ static bool save_brain(const char* path) {
         fwrite(&nu.id, 4, 1, f);
         fwrite(&nu.kind, 1, 1, f); fwrite(&nu.lobe, 1, 1, f);
         fwrite(&nu.state, 1, 1, f); fwrite(&nu.half, 1, 1, f);
+        fwrite(&nu.is_mouth, 1, 1, f);
         fwrite(&nu.x, 4, 1, f); fwrite(&nu.y, 4, 1, f);
         fwrite(&nu.mana, 8, 1, f); fwrite(&nu.cap, 8, 1, f);
         fwrite(&nu.credit, 2, 1, f);
@@ -1346,6 +1363,7 @@ static bool load_brain(const char* path) {
         fread(&nu.id,4,1,f);
         fread(&nu.kind,1,1,f); fread(&nu.lobe,1,1,f);
         fread(&nu.state,1,1,f); fread(&nu.half,1,1,f);
+        fread(&nu.is_mouth,1,1,f);
         fread(&nu.x,4,1,f); fread(&nu.y,4,1,f);
         fread(&nu.mana,8,1,f); fread(&nu.cap,8,1,f);
         fread(&nu.credit,2,1,f);
@@ -2013,7 +2031,7 @@ static void open_browser(int port) {
 
 int main(int argc, char** argv) {
     console_utf8();
-    int  N = 5000, port = 8420, headless_s = 0;
+    int  N = 32000, port = 8420, headless_s = 0;
     u64  seed = 12345;
     const char* loadf = nullptr;
 

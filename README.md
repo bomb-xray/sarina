@@ -8,7 +8,7 @@
 
 ```bash
 g++ -O2 -std=c++17 -pthread sarina.cpp -o sarina
-./sarina --neurons 5000 --port 8420
+./sarina --neurons 32000 --port 8420
 ```
 
 سپس داشبورد: <http://localhost:8420>
@@ -46,5 +46,5 @@ irm "https://raw.githubusercontent.com/bomb-xray/sarina/arena/01a00c33-sarina/ru
 ```powershell
 cd $env:USERPROFILE\sarina
 g++ -O2 -std=c++17 sarina.cpp -o sarina.exe -lws2_32 -static
-.\sarina.exe --neurons 5000 --port 8420
+.\sarina.exe --neurons 32000 --port 8420
 ```
