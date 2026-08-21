@@ -92,6 +92,13 @@ static constexpr i64 DEATH_CAP_PPT   = 1;         // سقف نرخ مرگ ۰٫۱
 static constexpr vtime DORMANT_TIME  = 30 * SEC;  // خواب زمستانی
 
 // --- زمان‌بندی --------------------------------------------------------------
+// --- پهنای باند حسی/حرکتی: ثابت و مستقل از اندازه‌ی مغز (بند ۲۶) ---
+// مثل عصب بینایی که با بزرگ‌تر شدن قشر بینایی، تعداد رشته‌هایش عوض نمی‌شود.
+// مغز بزرگ‌تر یعنی پردازش عمیق‌تر، نه دهان بزرگ‌تر یا گوش بیشتر.
+static constexpr int MOUTH_COUNT = 24;            // نورون‌های متصل به خروجی واقعی
+static constexpr int EAR_COUNT   = 48;            // نورون‌های گیرنده‌ی ورودی انسان
+static constexpr int MIRROR_COUNT= 48;            // نورون‌های گیرنده‌ی آینه
+
 static constexpr vtime REFRACTORY = 40 * MS;      // دوره‌ی تعلیق پس از هر فایر (ضد اسپم)
 static constexpr vtime SYS_TICK   = 50 * MS;      // سیستم‌تیک: درآمد، مالیات، مرگ
 static constexpr vtime EDGE_MIN   = 1 * MS;
@@ -180,6 +187,7 @@ struct Neuron {
     u8   state  = S_HEALTHY;
     u8   half   = 0;                 // نیمه‌ی الف/ب لوب ورودی
     u8   is_mouth = 0;               // آیا به خروجی واقعی وصل است؟ (بند ۲۴)
+    u8   is_ear   = 0;               // آیا ورودی بیرونی می‌گیرد؟ (بند ۲۶)
     i32  x = 0, y = 0;               // مختصات — برای سیم‌کشی محلی‌گرا (بند ۱۲٫۳)
 
     i64  mana     = 0;               // میلی‌مانا
@@ -715,12 +723,30 @@ static void build_brain(int N, u64 seed) {
     }
     for (int i = 0; i < n_giant; ++i) add(K_GIANT, L_CENTRAL, 0);
 
+    // --- انتخاب «گوش»: قیف ورودی (بند ۲۶) ---
+    // تعداد ثابت، مستقل از اندازه‌ی مغز. نیمه‌ی الف از انسان می‌شنود،
+    // نیمه‌ی ب آینه‌ی خود مدل را.
+    {
+        std::vector<u32> ears[2];
+        for (auto& nu : B.n)
+            if (nu.lobe == L_INPUT) ears[nu.half & 1].push_back(nu.id);
+        const int want[2] = { EAR_COUNT, MIRROR_COUNT };
+        for (int h = 0; h < 2; ++h) {
+            size_t w = std::min<size_t>((size_t)want[h], ears[h].size());
+            for (size_t k = 0; k < w; ++k) {
+                size_t j = R.below((u32)ears[h].size());
+                B.n[ears[h][j]].is_ear = 1;
+                ears[h].erase(ears[h].begin() + j);
+            }
+        }
+    }
+
     // --- انتخاب «دهان»: قیف خروجی (بند ۲۴) ---
     // حدود ۳٪ لوب پایانی به خروجی واقعی وصل می‌شود، با کف ۸ و سقف ۴۰.
     {
         std::vector<u32> outs;
         for (auto& nu : B.n) if (nu.lobe == L_OUTPUT) outs.push_back(nu.id);
-        size_t want = std::min<size_t>(40, std::max<size_t>(8, outs.size() * 3 / 100));
+        size_t want = std::min<size_t>((size_t)MOUTH_COUNT, outs.size());
         for (size_t k = 0; k < want && !outs.empty(); ++k) {
             size_t j = R.below((u32)outs.size());
             B.n[outs[j]].is_mouth = 1;
@@ -1272,13 +1298,14 @@ static void device_inject() {
         u8 b0 = q.front(); q.pop_front();
         u8 b1 = 0;
         if (!q.empty()) { b1 = q.front(); q.pop_front(); }
-        int fed = 0;
+        // فقط به «گوش‌ها» تزریق می‌شود — مجموعه‌ای ثابت و از پیش تعیین‌شده،
+        // نه هر نورونی که در پیمایش زودتر بیاید (بند ۲۶).
         for (auto& nu : B.n) {
-            if (nu.lobe != L_INPUT || nu.half != half || nu.state == S_DEAD) continue;
+            if (!nu.is_ear || nu.lobe != L_INPUT || nu.half != half) continue;
+            if (nu.state == S_DEAD) continue;
             int nl = nu.lines();
             deliver(nu.id, (u8)(nl - 2), b0);
             deliver(nu.id, (u8)(nl - 1), b1);
-            if (++fed >= 64) break;      // به یک زیرمجموعه تزریق می‌شود، نه همه
         }
     };
     feed(B.in_queue,     0);             // نیمه‌ی الف — از انسان
@@ -1322,7 +1349,7 @@ static bool save_brain(const char* path) {
         fwrite(&nu.id, 4, 1, f);
         fwrite(&nu.kind, 1, 1, f); fwrite(&nu.lobe, 1, 1, f);
         fwrite(&nu.state, 1, 1, f); fwrite(&nu.half, 1, 1, f);
-        fwrite(&nu.is_mouth, 1, 1, f);
+        fwrite(&nu.is_mouth, 1, 1, f); fwrite(&nu.is_ear, 1, 1, f);
         fwrite(&nu.x, 4, 1, f); fwrite(&nu.y, 4, 1, f);
         fwrite(&nu.mana, 8, 1, f); fwrite(&nu.cap, 8, 1, f);
         fwrite(&nu.credit, 2, 1, f);
@@ -1363,7 +1390,7 @@ static bool load_brain(const char* path) {
         fread(&nu.id,4,1,f);
         fread(&nu.kind,1,1,f); fread(&nu.lobe,1,1,f);
         fread(&nu.state,1,1,f); fread(&nu.half,1,1,f);
-        fread(&nu.is_mouth,1,1,f);
+        fread(&nu.is_mouth,1,1,f); fread(&nu.is_ear,1,1,f);
         fread(&nu.x,4,1,f); fread(&nu.y,4,1,f);
         fread(&nu.mana,8,1,f); fread(&nu.cap,8,1,f);
         fread(&nu.credit,2,1,f);
