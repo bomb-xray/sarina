@@ -95,7 +95,7 @@ static constexpr vtime DORMANT_TIME  = 30 * SEC;  // خواب زمستانی
 // --- پهنای باند حسی/حرکتی: ثابت و مستقل از اندازه‌ی مغز (بند ۲۶) ---
 // مثل عصب بینایی که با بزرگ‌تر شدن قشر بینایی، تعداد رشته‌هایش عوض نمی‌شود.
 // مغز بزرگ‌تر یعنی پردازش عمیق‌تر، نه دهان بزرگ‌تر یا گوش بیشتر.
-static constexpr int MOUTH_COUNT = 24;            // نورون‌های متصل به خروجی واقعی
+static constexpr int MOUTH_COUNT = 14;            // نورون‌های متصل به خروجی واقعی
 static constexpr int EAR_COUNT   = 48;            // نورون‌های گیرنده‌ی ورودی انسان
 static constexpr int MIRROR_COUNT= 48;            // نورون‌های گیرنده‌ی آینه
 
@@ -350,6 +350,7 @@ static std::atomic<int>  g_speed{1000};      // ‰ نسبت به بی‌درن�
 static std::atomic<bool> g_shutdown_req{false};
 static std::atomic<i64>  g_reward_pending{0};
 static bool              g_open_browser = true;
+static std::atomic<int>  g_talkativeness{100};   // ۱۰..۴۰۰ ٪ — کنترل زنده‌ی پرحرفی
 static std::atomic<bool> g_server_up{false};
 static vtime             g_stop_at = 0;      // ۰ = بی‌نهایت
 
@@ -1013,7 +1014,12 @@ static void neuron_eval(u32 id) {
     // دوره‌ی تعلیق: نورون بلافاصله پس از فایر نمی‌تواند دوباره شلیک کند.
     // لوب پایانی تعلیق بلندتری دارد — هر فایرش یک نماد خروجی است، پس
     // حرف زدن باید تصمیم باشد نه بازتاب.
-    vtime refr = nu.is_mouth ? REFRACTORY * 12 : REFRACTORY;
+    vtime refr = REFRACTORY;
+    if (nu.is_mouth) {
+        // پرحرفی: هرچه کمتر، تعلیق دهان بلندتر → کلمات کمتر
+        int t = g_talkativeness.load(std::memory_order_relaxed);
+        refr = REFRACTORY * 15 * 100 / std::max(10, t);
+    }
     bool refractory = (nu.last_fire >= 0 && B.now - nu.last_fire < refr);
 
     if (res.fired && res.mask && !refractory) {
@@ -1253,7 +1259,7 @@ static void device_decode() {
             int letters = 0;                     // شمارش حرف، نه بایت
             for (size_t k = 0; k < B.cur_word.size(); ++k)
                 if ((B.cur_word[k] & 0xC0) != 0x80) ++letters;
-            if (letters >= 10) device_close_word();
+            if (letters >= 12) device_close_word();
         }
     }
     if (B.out_text.size() > 900) B.out_text.erase(0, B.out_text.size() - 900);
@@ -1642,6 +1648,7 @@ input[type=range]{width:130px;vertical-align:middle}
   <button id="pause">توقف</button>
   <label class="dim">سرعت <input type="range" id="spd" min="0" max="20" value="10"><b id="spdv">۱×</b></label>
   <label class="dim">دما <input type="range" id="tmp" min="0" max="255" value="100"><b id="tmpv">100</b></label>
+  <label class="dim">پرحرفی <input type="range" id="tlk" min="10" max="400" step="10" value="100"><b id="tlkv">۱۰۰٪</b></label>
   <button class="p" id="rw">پاداش +۱۰</button>
   <button class="d" id="pn">تنبیه −۱۰</button>
   <button class="d" id="off">خاموش کردن و ذخیره</button>
@@ -1857,6 +1864,9 @@ document.getElementById('spd').oninput=e=>{
   const i=+e.target.value, v=i>=20?0:m[i];
   document.getElementById('spdv').textContent=v===0?'بیشینه':v+'×';
   fetch('/speed?v='+Math.round(v*1000));};
+document.getElementById('tlk').oninput=e=>{
+  document.getElementById('tlkv').textContent=fa(+e.target.value)+'٪';
+  fetch('/talk?v='+e.target.value);};
 document.getElementById('tmp').oninput=e=>{
   document.getElementById('tmpv').textContent=e.target.value;
   fetch('/temp?v='+e.target.value);};
@@ -1983,6 +1993,9 @@ static void http_server(int port) {
             body = std::string("{\"paused\":") + (p ? "true" : "false") + "}";
         } else if (R.rfind("GET /speed", 0) == 0) {
             g_speed.store(qparam(R, "v", 1000)); body = "{\"ok\":1}";
+        } else if (R.rfind("GET /talk", 0) == 0) {
+            g_talkativeness.store(std::max(10, std::min(400, qparam(R, "v", 100))));
+            body = "{\"ok\":1}";
         } else if (R.rfind("GET /temp", 0) == 0) {
             B.temperature.store(std::max(0, std::min(255, qparam(R, "v", 100)))); body = "{\"ok\":1}";
         } else if (R.rfind("GET /score", 0) == 0) {
