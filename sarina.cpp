@@ -1647,7 +1647,7 @@ input[type=range]{width:130px;vertical-align:middle}
       <button class="p" id="send">بگو</button>
     </div>
     <div class="hint">
-      روی هر کلمه کلیک کن تا نمره بدهی · نمره‌ی سریع با کلیک راست: <b>+۱۰</b>
+      روی هر کلمه کلیک کن تا نمره بدهی · تنبیه سریع با کلیک راست: <b>−۱۰</b>
     </div>
   </div>
 
@@ -1777,7 +1777,7 @@ document.getElementById('stream').addEventListener('click',e=>{
 });
 document.getElementById('stream').addEventListener('contextmenu',e=>{
   const w=e.target.closest('.w'); if(!w)return;
-  e.preventDefault(); score(w.dataset.id,10);
+  e.preventDefault(); score(w.dataset.id,-10);
 });
 function score(id,v){
   fetch('/score?id='+id+'&s='+v).then(()=>{lastKey='';tick();});
