@@ -20,6 +20,7 @@
 #include <cstring>
 #include <cstdio>
 #include <deque>
+#include <condition_variable>
 #include <mutex>
 #include <queue>
 #include <string>
@@ -351,6 +352,11 @@ static std::atomic<bool> g_shutdown_req{false};
 static std::atomic<i64>  g_reward_pending{0};
 static bool              g_open_browser = true;
 static std::atomic<int>  g_talkativeness{100};   // ۱۰..۴۰۰ ٪ — کنترل زنده‌ی پرحرفی
+
+// --- موازی‌سازی (بند ۲۸) ---
+static std::atomic<int>  g_threads{0};           // ۰ = خودکار (همه‌ی هسته‌ها)
+static std::atomic<int>  g_cpu_percent{100};     // ۱۰..۱۰۰ ٪ سقف مصرف CPU
+static std::atomic<double> g_cpu_measured{0.0};  // درصد اندازه‌گیری‌شده
 static std::atomic<bool> g_server_up{false};
 static vtime             g_stop_at = 0;      // ۰ = بی‌نهایت
 
@@ -1488,12 +1494,224 @@ static void snapshot(double wall) {
     g_stats = std::move(s);
 }
 
+// ---------------------------------------------------------------------------
+//  موتور پنجره‌ی موازی (بند ۲۸)
+//
+//  رویدادهای EV_EVAL داخل یک پنجره‌ی ۱ms کاملاً مستقل‌اند (بند ۱۲٫۱):
+//  سیگنالشان زودتر از t+1ms به هیچ‌جا نمی‌رسد. پس می‌توان همه را همزمان
+//  اجرا کرد. هر نخ خروجی‌هایش را در بافر محلی جمع می‌کند و در پایان
+//  پنجره — به ترتیب قطعی — در صف اصلی ادغام می‌شود، تا تکرارپذیری
+//  حفظ شود (بند ۱۲٫۹).
+// ---------------------------------------------------------------------------
+struct Worker {
+    std::vector<Event> out;          // رویدادهای تولیدشده
+    i64 fires = 0, signals = 0, faults = 0;
+    i64 burn[N_LOBES] = {0,0,0};
+    i64 pool_draw[N_LOBES] = {0,0,0};
+    std::vector<std::pair<vtime,i64>> transit;
+    std::vector<u8> out_bits;
+    char pad[64];                    // جلوگیری از false sharing
+};
+static std::vector<Worker> g_workers(256);   // اندازه‌ی ثابت: هرگز resize نمی‌شود
+
+static int effective_threads() {
+    int t = g_threads.load();
+    if (t <= 0) t = (int)std::thread::hardware_concurrency();
+    if (t <= 0) t = 1;
+    return std::max(1, std::min(256, t));
+}
+
+// اجرای یک نورون در حالت موازی — بدون دست زدن به حالت سراسری مشترک
+static void neuron_eval_mt(u32 id, Worker& W, vtime now) {
+    Neuron& nu = B.n[id];
+    if (nu.state == S_DEAD) return;
+
+    const vtime dt = now - nu.last_eval;
+    nu.last_eval = now;
+
+    i64 upkeep = nu.cap * UPKEEP_PCT / 1000 * dt / SEC;
+    if (nu.state == S_DORMANT) upkeep /= 10;
+    nu.mana -= upkeep;
+    if (upkeep > 0) { W.transit.push_back({now + TRANSIT_TIME, upkeep}); }
+
+    // برداشت از استخر — فقط درخواست ثبت می‌شود، تسویه در پایان پنجره
+    if (nu.mana < nu.cap) {
+        i64 want = nu.cap - nu.mana;
+        i64 share = 15 + std::min<i64>(85, (i64)nu.credit / 180);
+        i64 ask = want * share / 100;
+        if (ask > 0) { W.pool_draw[nu.lobe] += ask; nu.mana += ask; nu.last_income = now; }
+    }
+
+    { i64 decay = (i64)nu.credit * dt / (5 * SEC);
+      nu.credit = (u16)((i64)nu.credit > decay ? (i64)nu.credit - decay : 0); }
+
+    bool shielded = (now < B.lp[nu.lobe].penalty_until + 5 * SEC);
+    if (nu.mana <= 0) {
+        nu.mana = 0;
+        if (!shielded && nu.state != S_SPAM && now - nu.last_income > STARVE_TIME) {
+            nu.state = S_SPAM; nu.dcredit = DEATH_CREDIT; nu.spam_until = now + SPAM_TIME;
+        }
+    } else if (nu.mana * 100 < nu.cap * IGNORE_PCT) {
+        if (nu.state == S_HEALTHY || nu.state == S_DORMANT) nu.state = S_IGNORE;
+    } else if (nu.state == S_IGNORE) nu.state = S_HEALTHY;
+
+    if (nu.state == S_HEALTHY && nu.last_input >= 0 && now - nu.last_input > DORMANT_TIME
+        && nu.last_fire >= 0 && now - nu.last_fire > DORMANT_TIME) nu.state = S_DORMANT;
+
+    vtime cadence = KIND_CADENCE[nu.kind];
+    auto emit = [&](vtime t, u32 tgt, u8 ty, u8 ln, u8 bt) {
+        W.out.push_back(Event{t, tgt, ty, ln, bt, 0});
+    };
+
+    if (nu.state == S_SPAM) {
+        if (now >= nu.spam_until || nu.dcredit <= 0) { nu.state = S_DEAD; return; }
+        int nl = nu.lines();
+        u64 mask = nu.rng.next() & ((nl >= 64) ? ~0ull : ((1ull << nl) - 1));
+        i64 cost = FIRE_STARTUP + FIRE_PER_LINE * __builtin_popcountll(mask);
+        if (cost > nu.dcredit) nu.dcredit = 0;
+        else {
+            nu.dcredit -= cost;
+            u64 bits = nu.rng.next();
+            for (auto& e : nu.out)
+                if (e.line < 64 && ((mask >> (e.line % nl)) & 1)) {
+                    emit(now + e.delay, e.dst, EV_SIGNAL, e.line, (u8)((bits >> (e.line & 63)) & 1));
+                    W.signals++;
+                }
+        }
+        emit(now + cadence, id, EV_EVAL, 0, 0);
+        return;
+    }
+    if (nu.state == S_IGNORE) { emit(now + cadence, id, EV_EVAL, 0, 0); return; }
+    if (nu.state == S_ASLEEP) { emit(now + cadence * 4, id, EV_EVAL, 0, 0); return; }
+    if (nu.state == S_DORMANT) cadence *= 10;
+
+    VmResult res = vm_run(nu, B);
+    if (res.fault) { nu.faults++; W.faults++; nu.state = S_ASLEEP;
+                     emit(now + cadence * 4, id, EV_EVAL, 0, 0); return; }
+    if (res.sleep) { emit(now + cadence * 3, id, EV_EVAL, 0, 0); return; }
+
+    vtime refr = REFRACTORY;
+    if (nu.is_mouth) {
+        int t = g_talkativeness.load(std::memory_order_relaxed);
+        refr = REFRACTORY * 15 * 100 / std::max(10, t);
+    }
+    bool refractory = (nu.last_fire >= 0 && now - nu.last_fire < refr);
+
+    if (res.fired && res.mask && !refractory) {
+        int nl = nu.lines();
+        i64 cost = FIRE_STARTUP + FIRE_PER_LINE * __builtin_popcountll(res.mask);
+        if (nu.mana >= cost) {
+            nu.mana -= cost;
+            W.transit.push_back({now + TRANSIT_TIME, cost});
+            W.burn[nu.lobe] += cost;
+            nu.last_fire = now; nu.fires++; W.fires++;
+            { i64 nc = (i64)nu.credit + cost / 16;
+              nu.credit = (u16)std::min<i64>(nc, 65535); }
+            for (auto& e : nu.out) {
+                int li = e.line % nl;
+                if ((res.mask >> li) & 1) {
+                    emit(now + e.delay, e.dst, EV_SIGNAL, e.line, (u8)((res.bits >> (li & 63)) & 1));
+                    W.signals++;
+                }
+            }
+            if (nu.lobe == L_OUTPUT && nu.is_mouth) {
+                int l0 = nl - 2, l1 = nl - 1;
+                if (((res.mask >> l0) & 1) || ((res.mask >> l1) & 1)) {
+                    W.out_bits.push_back((u8)((res.bits >> l0) & 1));
+                    W.out_bits.push_back((u8)((res.bits >> l1) & 1));
+                }
+            }
+        }
+        nu.in_bits = 0;
+    }
+    emit(now + cadence / 2 + (vtime)nu.rng.below((u32)(cadence / 2)), id, EV_EVAL, 0, 0);
+}
+
+// ---------------------------------------------------------------------------
+//  استخر نخ ماندگار (بند ۲۸٫۱)
+//  ساخت نخ در هر پنجره‌ی ۱ms فاجعه است (~۲۰µs ساخت در برابر کار ناچیز).
+//  نخ‌ها یک بار ساخته می‌شوند و با چرخش سبک منتظر کار می‌مانند.
+// ---------------------------------------------------------------------------
+namespace pool {
+    std::vector<std::thread>  threads;
+    std::atomic<int>          generation{0};
+    std::atomic<int>          done{0};
+    std::atomic<bool>         quit{false};
+    const std::vector<u32>*   job = nullptr;
+    vtime                     job_now = 0;
+    int                       nthr = 0;
+    std::mutex                mx;
+    std::condition_variable   cv, cv_done;
+}
+
+static void pool_worker(int idx) {
+    int seen = 0;
+    while (true) {
+        {   // خواب واقعی تا رسیدن کار — چرخش، CPU را حتی بی‌کار می‌سوزاند
+            std::unique_lock<std::mutex> lk(pool::mx);
+            pool::cv.wait(lk, [&]{ return pool::quit.load() ||
+                                          pool::generation.load() != seen; });
+            if (pool::quit.load()) return;
+            seen = pool::generation.load();
+        }
+        const std::vector<u32>& ev = *pool::job;
+        int nt = pool::nthr;
+        size_t chunk = (ev.size() + nt - 1) / nt;
+        size_t a = (size_t)idx * chunk, b = std::min(ev.size(), a + chunk);
+        for (size_t k = a; k < b; ++k)
+            neuron_eval_mt(ev[k], g_workers[idx], pool::job_now);
+        if (pool::done.fetch_add(1, std::memory_order_release) + 1 >= pool::nthr - 1) {
+            std::lock_guard<std::mutex> lk(pool::mx);
+            pool::cv_done.notify_all();
+        }
+    }
+}
+
+static void pool_stop() {
+    if (pool::threads.empty()) return;
+    { std::lock_guard<std::mutex> lk(pool::mx);
+      pool::quit.store(true, std::memory_order_release);
+      pool::cv.notify_all(); }
+    for (auto& t : pool::threads) if (t.joinable()) t.join();
+    pool::threads.clear();
+    pool::quit.store(false, std::memory_order_release);
+}
+
+static void pool_start(int nthr) {
+    if ((int)pool::threads.size() == nthr - 1) return;
+    pool_stop();
+    pool::generation.store(0); pool::done.store(0);
+    pool::nthr = nthr;
+    for (int i = 1; i < nthr; ++i) pool::threads.emplace_back(pool_worker, i);
+}
+
+static void pool_run(int nthr, const std::vector<u32>& evals, vtime now) {
+    pool_start(nthr);
+    { std::lock_guard<std::mutex> lk(pool::mx);
+      pool::job = &evals; pool::job_now = now; pool::nthr = nthr;
+      pool::done.store(0, std::memory_order_release);
+      pool::generation.fetch_add(1, std::memory_order_release);
+      pool::cv.notify_all(); }
+
+    // نخ اصلی هم سهم خودش را انجام می‌دهد
+    size_t chunk = (evals.size() + nthr - 1) / nthr;
+    size_t b = std::min(evals.size(), chunk);
+    for (size_t k = 0; k < b; ++k) neuron_eval_mt(evals[k], g_workers[0], now);
+
+    if (nthr > 1) {
+        std::unique_lock<std::mutex> lk(pool::mx);
+        pool::cv_done.wait(lk, [&]{ return pool::done.load() >= nthr - 1; });
+    }
+}
+
 static void sim_loop() {
     using clk = std::chrono::steady_clock;
     auto  t0  = clk::now();
     vtime v0  = B.now;
     vtime next_snap = B.now;
     vtime next_dec  = B.now;
+    double cpu_busy = 0, cpu_total = 0;
+    int death_sweep = 0;
 
     while (g_running.load()) {
         if (g_paused.load()) {
@@ -1508,6 +1726,7 @@ static void sim_loop() {
             device_decode();
             snapshot(0.0);
             g_running.store(false);
+            pool_stop();
             break;
         }
 
@@ -1523,18 +1742,104 @@ static void sim_loop() {
             }
         }
 
-        B.q.pop();
-        B.now = e.t;
-        B.c_events++;
+        auto win_t0 = clk::now();
 
-        switch (e.type) {
-            case EV_EVAL:   neuron_eval(e.target); break;
-            case EV_SIGNAL: deliver(e.target, e.line, e.bit); break;
-            case EV_SYS:    system_tick(); break;
-            default: break;
+        // ---------------- پنجره‌ی موازی (بند ۲۸) ----------------
+        // همه‌ی رویدادهای بازه‌ی [t, t+WINDOW) را یکجا برمی‌داریم.
+        // چون حداقل تأخیر یال ۱ms است، هیچ‌کدام نمی‌توانند روی
+        // یکدیگر اثر بگذارند — پس اجرای موازی امن است (بند ۱۲٫۱).
+        const vtime WINDOW = EDGE_MIN;
+        const vtime w_end  = e.t + WINDOW;
+
+        static std::vector<u32> evals;
+        static std::vector<Event> others;
+        evals.clear(); others.clear();
+
+        while (!B.q.empty() && B.q.top().t < w_end) {
+            Event ev = B.q.top(); B.q.pop();
+            B.now = ev.t; B.c_events++;
+            if (ev.type == EV_EVAL) evals.push_back(ev.target);
+            else others.push_back(ev);
+        }
+        B.now = w_end - 1;
+
+        // سیگنال‌ها و سیستم‌تیک ترتیبی‌اند (ارزان و باید مرتب باشند)
+        for (auto& ev : others) {
+            if (ev.type == EV_SIGNAL) deliver(ev.target, ev.line, ev.bit);
+            else if (ev.type == EV_SYS) system_tick();
         }
 
+        // --- اجرای موازی نورون‌ها ---
+        int nthr = effective_threads();
+        // g_workers باید پیش از ساخت نخ‌ها تثبیت شود، وگرنه resize
+        // بعدی اشاره‌گرهای نخ‌های در حال اجرا را باطل می‌کند.
+
+        for (int i = 0; i < nthr; ++i) {
+            Worker& W = g_workers[i];
+            W.out.clear(); W.transit.clear(); W.out_bits.clear();
+            W.fires = W.signals = W.faults = 0;
+            for (int L = 0; L < N_LOBES; ++L) { W.burn[L] = 0; W.pool_draw[L] = 0; }
+        }
+
+        if (!evals.empty()) {
+            if (nthr == 1 || evals.size() < 256) {
+                for (u32 id : evals) neuron_eval_mt(id, g_workers[0], B.now);
+            } else {
+                pool_run(nthr, evals, B.now);
+            }
+        }
+
+        // --- ادغام قطعی: ترتیب نخ‌ها ثابت است، پس تکرارپذیر می‌ماند ---
+        for (int i = 0; i < nthr; ++i) {
+            Worker& W = g_workers[i];
+            for (auto& ev : W.out) B.push(ev.t, ev.target, ev.type, ev.line, ev.bit);
+            for (auto& tr : W.transit) { B.transit.push_back(tr); B.transit_total += tr.second; }
+            for (u8 b : W.out_bits) B.out_bits.push_back(b);
+            B.c_fires += W.fires; B.c_signals += W.signals; B.c_faults += W.faults;
+            for (int L = 0; L < N_LOBES; ++L) {
+                B.lp[L].burn_recent += W.burn[L];
+                B.lp[L].pool = std::max<i64>(0, B.lp[L].pool - W.pool_draw[L]);
+            }
+        }
+        // مرتب‌سازی لازم نیست: همه‌ی ورودی‌های یک پنجره مهر زمانی یکسان
+        // دارند و پنجره‌ها به ترتیب پیش می‌روند، پس صف ذاتاً مرتب می‌ماند.
+        // (پیش‌تر std::sort روی ~۵۰۰ هزار عنصر در هر پنجره اجرا می‌شد
+        //  که کل موتور را از کار می‌انداخت.)
+        // ثبت مرگ‌ها: پیمایش کل جمعیت در هر پنجره گران است
+        // (۳۲ هزار نورون × ۱۰۰۰ پنجره در ثانیه). فقط هر ۵۰ پنجره یک بار.
+        if (++death_sweep >= 50) {
+            death_sweep = 0;
+            for (auto& nu : B.n)
+                if (nu.state == S_DEAD && nu.cap > 0) {
+                    B.lp[nu.lobe].alive--; B.lp[nu.lobe].cap_sum -= nu.cap;
+                    B.lp[nu.lobe].deaths_window++; nu.cap = 0;
+                }
+        }
+        if (B.out_bits.size() > 4096)
+            B.out_bits.erase(B.out_bits.begin(), B.out_bits.begin() + 2048);
+
         device_inject();
+
+        // --- محدودکننده‌ی مصرف CPU (بند ۲۸٫۲) ---
+        // نسبت کار به استراحت را نگه می‌دارد: اگر سقف ۵۰٪ باشد،
+        // به ازای هر واحد زمان کار، همان‌قدر می‌خوابد.
+        {
+            int lim = g_cpu_percent.load();
+            if (lim < 100) {
+                double busy = std::chrono::duration<double>(clk::now() - win_t0).count();
+                double sleep_s = busy * (100.0 - lim) / std::max(1, lim);
+                if (sleep_s > 0.00002) {
+                    if (sleep_s > 0.05) sleep_s = 0.05;
+                    std::this_thread::sleep_for(std::chrono::duration<double>(sleep_s));
+                }
+                cpu_busy += busy; cpu_total += busy + sleep_s;
+            } else { cpu_busy += std::chrono::duration<double>(clk::now() - win_t0).count();
+                     cpu_total = cpu_busy; }
+            if (cpu_total > 0.5) {
+                g_cpu_measured.store(cpu_busy / cpu_total * 100.0);
+                cpu_busy = 0; cpu_total = 0;
+            }
+        }
 
         if (B.now >= next_snap) {
             device_decode();
@@ -1554,6 +1859,7 @@ static void sim_loop() {
             g_paused.store(true);
         }
     }
+    pool_stop();     // بستن امن نخ‌ها، وگرنه terminate می‌دهد
 }
 
 // ============================================================================
@@ -1649,6 +1955,8 @@ input[type=range]{width:130px;vertical-align:middle}
   <label class="dim">سرعت <input type="range" id="spd" min="0" max="20" value="10"><b id="spdv">۱×</b></label>
   <label class="dim">دما <input type="range" id="tmp" min="0" max="255" value="100"><b id="tmpv">100</b></label>
   <label class="dim">پرحرفی <input type="range" id="tlk" min="10" max="400" step="10" value="100"><b id="tlkv">۱۰۰٪</b></label>
+  <label class="dim">سقف CPU <input type="range" id="cpu" min="10" max="100" step="5" value="100"><b id="cpuv">۱۰۰٪</b></label>
+  <label class="dim">نخ <input type="number" id="thr" min="0" max="128" value="0" style="width:52px"><b id="thrv"></b></label>
   <button class="p" id="rw">پاداش +۱۰</button>
   <button class="d" id="pn">تنبیه −۱۰</button>
   <button class="d" id="off">خاموش کردن و ذخیره</button>
@@ -1662,6 +1970,7 @@ input[type=range]{width:130px;vertical-align:middle}
     <div class="card"><div class="lbl">کل مانا</div><div class="val" id="mana">—</div><div class="sub" id="transit"></div></div>
     <div class="card"><div class="lbl">رویداد</div><div class="val" id="evs">—</div><div class="sub" id="evrate"></div></div>
     <div class="card"><div class="lbl">خطای تابع</div><div class="val" id="flt">—</div><div class="sub">نورون به خواب رفته</div></div>
+    <div class="card"><div class="lbl">پردازنده</div><div class="val" id="cpuu">—</div><div class="sub" id="thrs"></div></div>
   </div>
 
   <div class="panel">
@@ -1753,6 +2062,9 @@ async function tick(){
   document.getElementById('evs').textContent=fa(s.events);
   document.getElementById('evrate').textContent=fa(Math.round(s.evrate))+' بر ثانیه';
   document.getElementById('flt').textContent=fa(s.faults);
+  document.getElementById('cpuu').textContent=fa(Math.round(s.cpuused||0))+'٪';
+  document.getElementById('thrs').textContent=fa(s.threads||1)+' نخ · سقف '+fa(s.cpulimit||100)+'٪';
+  document.getElementById('thrv').textContent=(document.getElementById('thr').value=='0'?'(خودکار: '+fa(s.threads)+')':'');
   document.getElementById('s_h').textContent=fa(s.healthy);
   document.getElementById('s_i').textContent=fa(s.ignoring);
   document.getElementById('s_s').textContent=fa(s.spamming);
@@ -1864,6 +2176,10 @@ document.getElementById('spd').oninput=e=>{
   const i=+e.target.value, v=i>=20?0:m[i];
   document.getElementById('spdv').textContent=v===0?'بیشینه':v+'×';
   fetch('/speed?v='+Math.round(v*1000));};
+document.getElementById('cpu').oninput=e=>{
+  document.getElementById('cpuv').textContent=fa(+e.target.value)+'٪';
+  fetch('/cpu?v='+e.target.value);};
+document.getElementById('thr').onchange=e=>fetch('/threads?v='+e.target.value);
 document.getElementById('tlk').oninput=e=>{
   document.getElementById('tlkv').textContent=fa(+e.target.value)+'٪';
   fetch('/talk?v='+e.target.value);};
@@ -1886,13 +2202,15 @@ static std::string json_stats() {
     snprintf(buf, sizeof buf,
         "\"vt\":%.3f,\"alive\":%lld,\"dead\":%lld,\"healthy\":%lld,\"ignoring\":%lld,"
         "\"spamming\":%lld,\"dormant\":%lld,\"asleep\":%lld,\"fire_hz\":%.4f,"
-        "\"mana\":%.1f,\"transit\":%.1f,\"events\":%lld,\"evrate\":%.1f,\"faults\":%lld,",
+        "\"mana\":%.1f,\"transit\":%.1f,\"events\":%lld,\"evrate\":%.1f,\"faults\":%lld,"
+        "\"threads\":%d,\"cpulimit\":%d,\"cpuused\":%.0f,",
         (double)s.vtime_us / SEC, (long long)s.alive, (long long)s.dead,
         (long long)s.healthy, (long long)s.ignoring, (long long)s.spamming,
         (long long)s.dormant, (long long)s.asleep, s.fire_hz,
         (double)s.total_mana / MANA, (double)s.transit / MANA,
         (long long)s.events, s.wall_s > 0 ? s.events / s.wall_s : 0.0,
-        (long long)s.faults);
+        (long long)s.faults,
+        effective_threads(), g_cpu_percent.load(), g_cpu_measured.load());
     j += buf;
 
     j += "\"pool\":[";
@@ -1993,6 +2311,12 @@ static void http_server(int port) {
             body = std::string("{\"paused\":") + (p ? "true" : "false") + "}";
         } else if (R.rfind("GET /speed", 0) == 0) {
             g_speed.store(qparam(R, "v", 1000)); body = "{\"ok\":1}";
+        } else if (R.rfind("GET /threads", 0) == 0) {
+            g_threads.store(std::max(0, std::min(256, qparam(R, "v", 0))));
+            body = "{\"ok\":1}";
+        } else if (R.rfind("GET /cpu", 0) == 0) {
+            g_cpu_percent.store(std::max(10, std::min(100, qparam(R, "v", 100))));
+            body = "{\"ok\":1}";
         } else if (R.rfind("GET /talk", 0) == 0) {
             g_talkativeness.store(std::max(10, std::min(400, qparam(R, "v", 100))));
             body = "{\"ok\":1}";
@@ -2085,6 +2409,8 @@ int main(int argc, char** argv) {
         else if (a == "--headless")headless_s = atoi(nxt());
         else if (a == "--speed")   g_speed.store(atoi(nxt()));
         else if (a == "--no-browser") g_open_browser = false;
+        else if (a == "--threads")    g_threads.store(atoi(nxt()));
+        else if (a == "--cpu")        g_cpu_percent.store(std::max(10, std::min(100, atoi(nxt()))));
     }
 
     printf("\n");
