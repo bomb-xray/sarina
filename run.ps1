@@ -17,9 +17,10 @@ try {
     chcp 65001 > $null
 } catch { }
 
-$ScriptVersion = '2.3'
+$ScriptVersion = '2.4'
 $Branch  = 'arena/01a00c33-sarina'
 $RawBase = "https://raw.githubusercontent.com/bomb-xray/sarina/$Branch"
+$ApiBase = "https://api.github.com/repos/bomb-xray/sarina/contents"
 $Dir     = Join-Path $env:USERPROFILE 'sarina'
 $Port    = 8420
 $Neurons = 32000
@@ -44,8 +45,17 @@ Ok $Dir
 # --- ۲. دریافت کد ----------------------------------------------------------
 Step 2 'دریافت کد (~۶۰ کیلوبایت)'
 try {
-    $bust = "?v=" + [guid]::NewGuid().ToString('N').Substring(0,8)
-    Invoke-WebRequest -Uri "$RawBase/sarina.cpp$bust" -OutFile 'sarina.cpp' -UseBasicParsing -TimeoutSec 90
+    # از API گیت‌هاب می‌گیریم: کش نمی‌شود و ۴۰۳ نمی‌دهد
+    # (raw.githubusercontent با پارامتر دلخواه ۴۰۳ برمی‌گرداند)
+    try {
+        $hdr = @{ Accept = 'application/vnd.github.raw'; 'User-Agent' = 'sarina-installer' }
+        Invoke-WebRequest -Uri "$ApiBase/sarina.cpp?ref=$Branch" -Headers $hdr `
+                          -OutFile 'sarina.cpp' -UseBasicParsing -TimeoutSec 90
+    } catch {
+        # اگر API در دسترس نبود، مسیر معمولی بدون پارامتر
+        Invoke-WebRequest -Uri "$RawBase/sarina.cpp" -OutFile 'sarina.cpp' `
+                          -Headers @{ 'Cache-Control' = 'no-cache' } -UseBasicParsing -TimeoutSec 90
+    }
     $kb = [math]::Round((Get-Item 'sarina.cpp').Length / 1KB, 1)
     Ok "sarina.cpp دریافت شد ($kb KB)"
 } catch {
