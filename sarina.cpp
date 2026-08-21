@@ -819,7 +819,7 @@ static void apply_reward(i64 milli) {          // پاداش/تنبیه از د�
     // می‌گیرد: یک نمره‌ی ±۱۰ حدود ۱۵٪ استخر لوب پایانی را جابه‌جا می‌کند.
     double s   = (double)milli;
     double mag = std::log(1.0 + std::fabs(s) / MANA) / std::log(11.0);   // ±۱۰ → ۱٫۰
-    double c   = (s >= 0 ? 1.0 : -1.0) * mag * (double)B.lp[L_OUTPUT].target * 0.40;
+    double c   = (s >= 0 ? 1.0 : -1.0) * mag * (double)B.lp[L_OUTPUT].target * 0.20;
     i64 v = (i64)c;
 
     // نشت خودتنظیم (بند ۵٫۳): استخر گرسنه بیشتر می‌مکد
@@ -845,14 +845,14 @@ static void apply_reward(i64 milli) {          // پاداش/تنبیه از د�
         B.lp[L_CENTRAL].boost_until = std::max(B.lp[L_CENTRAL].boost_until, B.now + bd);
     }
     if (v < 0) {
-        vtime dur = (vtime)(12.0 * SEC * mag);
+        vtime dur = (vtime)(3.0 * SEC * mag);
         B.lp[L_OUTPUT].penalty_until  = std::max(B.lp[L_OUTPUT].penalty_until,  B.now + dur);
         B.lp[L_CENTRAL].penalty_until = std::max(B.lp[L_CENTRAL].penalty_until, B.now + dur / 2);
     }
 
     // کف حیاتی: تنبیه نمی‌تواند استخر را زیر ۵٪ هدف ببرد (بند ۱۱٫۲)
     for (int L = 0; L < N_LOBES; ++L) {
-        i64 floor_ = B.lp[L].target / 20;
+        i64 floor_ = B.lp[L].target * 12 / 100;
         if (B.lp[L].pool < floor_) B.lp[L].pool = floor_;
     }
 }
@@ -897,7 +897,11 @@ static void neuron_eval(u32 id) {
     // --- حالت‌ها (بند ۶) ---
     if (nu.mana <= 0) {
         nu.mana = 0;
-        if (nu.state != S_SPAM && B.now - nu.last_income > STARVE_TIME) {
+        // سپر مرگ در دوره‌ی تنبیه: نمره‌ی منفی باید درد بدهد، نه قتل عام.
+        // بدون این، یک نمره‌ی −۱۰ صدها نورون را می‌کشت — تنبیه معنایش
+        // «ساکت شو» است، نه «بمیر».
+        bool shielded = (B.now < B.lp[nu.lobe].penalty_until + 5 * SEC);
+        if (!shielded && nu.state != S_SPAM && B.now - nu.last_income > STARVE_TIME) {
             nu.state = S_SPAM;
             nu.dcredit = DEATH_CREDIT;
             nu.spam_until = B.now + SPAM_TIME;
@@ -1035,7 +1039,7 @@ static void system_tick() {
                 // مانای بازگشتیِ لوبِ تنبیه‌شده نه به خودش می‌رسد و نه به
                 // لوب دیگری منتقل می‌شود — واقعاً می‌سوزد. اگر منتقل می‌شد،
                 // تنبیه فقط ثروت را جابه‌جا می‌کرد نه اینکه درد بسازد.
-                if (B.now < B.lp[L].penalty_until) { B.treasury += part; continue; }
+                if (B.now < B.lp[L].penalty_until) { B.treasury += part / 2; part /= 2; }
                 i64 room = B.lp[L].target - B.lp[L].pool;
                 if (room < 0) room = 0;
                 i64 give = std::min(part, room);
@@ -1086,7 +1090,7 @@ static void system_tick() {
             income = (i64)(income * (1.0 + 2.0 * (SUBSIST - f) / SUBSIST));
         }
 
-        if (B.now < P.penalty_until)    income /= 40;  // دوره‌ی بدهی پس از تنبیه
+        if (B.now < P.penalty_until)    income /= 3;   // دوره‌ی بدهی پس از تنبیه
         else if (B.now < P.boost_until) income *= 3;   // دوره‌ی رونق پس از پاداش
         if (P.emergency) income *= 3;
 
