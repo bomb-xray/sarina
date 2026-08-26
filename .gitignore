@@ -1,5 +1,8 @@
-sarina
-sarina.exe
+smile
+smile.exe
+smile-gpu
+smile-gpu.exe
 brain.dat
 *.o
 gmon.out
+*.zip

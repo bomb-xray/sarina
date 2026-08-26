@@ -1,285 +1,164 @@
-# ============================================================================
-#  سارینا — نصب و اجرای خودکار (ویندوز / PowerShell)
-#
-#  آنلاین:
-#  irm https://raw.githubusercontent.com/bomb-xray/sarina/arena/01a00c33-sarina/run.ps1 | iex
-#
-#  از پوشه‌ی دانلودشده:
-#  powershell -ExecutionPolicy Bypass -File .\run.ps1
-#
-#  نیازی به دسترسی ادمین ندارد. اگر کامپایلر نبود، یک نسخه‌ی قابل حمل
-#  (w64devkit، حدود ۹۰ مگابایت) را در پوشه‌ی خود پروژه می‌گیرد.
-# ============================================================================
+# smile local CPU/CUDA runner for Windows
+# GPU test: powershell -ExecutionPolicy Bypass -File .\run.ps1
+# CPU app : powershell -ExecutionPolicy Bypass -File .\run.ps1 -Cpu
+param(
+    [switch]$Cpu,
+    [ValidateRange(10,100)][int]$GpuLimit = 70,
+    [ValidateRange(0,86400)][int]$Seconds = 120,
+    [ValidateRange(0,16)][int]$Device = 0
+)
 
 $ErrorActionPreference = 'Stop'
-$ProgressPreference    = 'Continue'
-
-# کنسول ویندوز پیش‌فرض UTF-8 نیست → متن فارسی به‌هم می‌ریزد
+$ProgressPreference = 'SilentlyContinue'
 try {
-    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-    $OutputEncoding           = [System.Text.Encoding]::UTF8
+    [Console]::OutputEncoding = [Text.Encoding]::UTF8
+    $OutputEncoding = [Text.Encoding]::UTF8
     chcp 65001 > $null
 } catch { }
 
-$ScriptVersion = '2.7'
-$Branch  = 'arena/01a00c33-sarina'
-$RawBase = "https://raw.githubusercontent.com/bomb-xray/sarina/$Branch"
-$ApiBase = "https://api.github.com/repos/bomb-xray/sarina/contents"
-
-# اگر اسکریپت از یک فایل واقعی اجرا شده و کد/داده کنارش هستند، همان پوشه
-# پروژه است. حالت irm|iex مسیر فایل ندارد و همچنان در %USERPROFILE%\sarina نصب می‌شود.
-$LocalMode = $false
-$Dir = Join-Path $env:USERPROFILE 'sarina'
-if ($PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot 'sarina.cpp')) -and (Test-Path (Join-Path $PSScriptRoot 'persian_words.tsv'))) {
-    $LocalMode = $true
-    $Dir = $PSScriptRoot
-}
-
-$Port    = 8420
-$Neurons = 32000
-
-function Step($n, $t) { Write-Host "  [$n/5] $t" -ForegroundColor Cyan }
-function Ok($t)       { Write-Host "        $t" -ForegroundColor Green }
-function Warn($t)     { Write-Host "        $t" -ForegroundColor Yellow }
-function Fail($t)     { Write-Host "  [!] $t" -ForegroundColor Red }
-
-Write-Host ''
-Write-Host '  ================================================' -ForegroundColor Cyan
-Write-Host "    سارینا - مغز دیجیتال   (اسکریپت v$ScriptVersion)" -ForegroundColor Cyan
-Write-Host '  ================================================' -ForegroundColor Cyan
-Write-Host ''
-
-# --- ۱. پوشه --------------------------------------------------------------
-Step 1 'آماده‌سازی پوشه'
-New-Item -ItemType Directory -Force -Path $Dir | Out-Null
+$Dir = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
 Set-Location $Dir
-Ok $Dir
+$Port = 8420
 
-# --- ۲. کد + داده ---------------------------------------------------------
-if ($LocalMode) {
-    Step 2 'استفاده از فایل‌های همین پوشه (حالت محلی)'
-    foreach ($name in @('sarina.cpp', 'persian_words.tsv')) {
-        $item = Get-Item (Join-Path $Dir $name) -ErrorAction SilentlyContinue
-        if (-not $item -or $item.Length -eq 0) {
-            Fail "فایل محلی ناقص است: $name"
-            return
-        }
-        Ok ("{0} ({1} KB)" -f $name, [math]::Round($item.Length / 1KB, 1))
-    }
-} else {
-    Step 2 'دریافت کد و واژه‌نامه‌ی فارسی (~۲.۶ مگابایت)'
-    try {
-        # از API گیت‌هاب می‌گیریم: کش نمی‌شود و ۴۰۳ نمی‌دهد
-        # (raw.githubusercontent با پارامتر دلخواه ۴۰۳ برمی‌گرداند)
-        $hdr = @{ Accept = 'application/vnd.github.raw'; 'User-Agent' = 'sarina-installer' }
-        foreach ($name in @('sarina.cpp', 'persian_words.tsv')) {
-            try {
-                Invoke-WebRequest -Uri "$ApiBase/$name`?ref=$Branch" -Headers $hdr `
-                                  -OutFile $name -UseBasicParsing -TimeoutSec 120
-            } catch {
-                # اگر API در دسترس نبود، مسیر معمولی بدون پارامتر
-                Invoke-WebRequest -Uri "$RawBase/$name" -OutFile $name `
-                                  -Headers @{ 'Cache-Control' = 'no-cache' } -UseBasicParsing -TimeoutSec 120
-            }
-            $kb = [math]::Round((Get-Item $name).Length / 1KB, 1)
-            Ok "$name دریافت شد ($kb KB)"
-        }
-    } catch {
-        Fail "دانلود ناموفق: $($_.Exception.Message)"
-        Write-Host '  اتصال اینترنت یا دسترسی به گیت‌هاب را بررسی کنید.' -ForegroundColor Red
-        return
-    }
-}
-
-# --- ۳. یافتن کامپایلر -----------------------------------------------------
-Step 3 'جست‌وجوی کامپایلر ++C'
-
-$gpp = $null
-$cmd = Get-Command g++ -ErrorAction SilentlyContinue
-if ($cmd) { $gpp = $cmd.Source }
-
-if (-not $gpp) {
-    # مسیرهای رایج — شامل MSYS2 که ممکن است نصب شده ولی در PATH نباشد
-    $known = @(
-        "$Dir\w64devkit\bin\g++.exe",
-        'C:\msys64\ucrt64\bin\g++.exe',
-        'C:\msys64\mingw64\bin\g++.exe',
-        'C:\msys64\clang64\bin\g++.exe',
-        'C:\mingw64\bin\g++.exe',
-        'C:\MinGW\bin\g++.exe',
-        'C:\ProgramData\mingw64\mingw64\bin\g++.exe',
-        "$env:LOCALAPPDATA\Programs\mingw64\bin\g++.exe",
-        "$env:ProgramFiles\LLVM\bin\clang++.exe"
-    )
-    foreach ($p in $known) { if (Test-Path $p) { $gpp = $p; break } }
-
-    # جست‌وجوی عمیق‌تر در محل‌های نصب معمول
-    if (-not $gpp) {
-        foreach ($root in @('C:\msys64', 'C:\tools', "$env:LOCALAPPDATA\Programs")) {
-            if (Test-Path $root) {
-                $hit = Get-ChildItem -Path $root -Filter 'g++.exe' -Recurse -ErrorAction SilentlyContinue |
-                       Select-Object -First 1
-                if ($hit) { $gpp = $hit.FullName; break }
-            }
-        }
-    }
-}
-
-if ($gpp) {
-    # به PATH نشست جاری اضافه کن تا DLLهای کامپایلر پیدا شوند
-    $binDir = Split-Path $gpp -Parent
-    if ($env:Path -notlike "*$binDir*") { $env:Path = "$binDir;$env:Path" }
-}
-
-if ($gpp) {
-    Ok "پیدا شد: $gpp"
-} else {
-    Warn 'کامپایلر نصب نیست.'
-    Write-Host ''
-    Write-Host '        دریافت w64devkit (قابل حمل، ~۹۰ مگابایت، بدون نیاز به ادمین)' -ForegroundColor Yellow
-    Write-Host '        این کار بسته به سرعت اینترنت ۱ تا ۵ دقیقه طول می‌کشد.' -ForegroundColor DarkGray
-    Write-Host ''
-    $ans = Read-Host '        ادامه بدهم? (y/n)'
-    if ($ans -notmatch '^[yY]') {
-        Write-Host ''
-        Write-Host '  لغو شد. برای نصب دستی کامپایلر:' -ForegroundColor Yellow
-        Write-Host '     winget install BrechtSanders.WinLibs.POSIX.UCRT' -ForegroundColor White
-        Write-Host '  یا  https://www.msys2.org' -ForegroundColor White
-        return
-    }
-
-    $ver = '2.8.0'
-    $url = "https://github.com/skeeto/w64devkit/releases/download/v$ver/w64devkit-x64-$ver.7z.exe"
-    $sfx = Join-Path $Dir 'w64devkit.7z.exe'
-
-    try {
-        Write-Host '        در حال دانلود …' -ForegroundColor DarkGray
-        $wc = New-Object System.Net.WebClient
-        $wc.DownloadFile($url, $sfx)
-        Ok ("دانلود شد ({0} MB)" -f [math]::Round((Get-Item $sfx).Length / 1MB, 0))
-
-        Write-Host '        در حال استخراج …' -ForegroundColor DarkGray
-        & $sfx -y "-o$Dir" | Out-Null
-        Remove-Item $sfx -Force -ErrorAction SilentlyContinue
-
-        $cand = Join-Path $Dir 'w64devkit\bin\g++.exe'
-        if (Test-Path $cand) { $gpp = $cand; Ok 'کامپایلر آماده شد' }
-        else { Fail 'استخراج ناموفق بود.'; return }
-    } catch {
-        Fail "دریافت کامپایلر ناموفق: $($_.Exception.Message)"
-        Write-Host '  نصب دستی:  winget install BrechtSanders.WinLibs.POSIX.UCRT' -ForegroundColor White
-        return
-    }
-}
-
-# --- ۴. کامپایل -------------------------------------------------------------
-Step 4 'کامپایل (۱۰ تا ۳۰ ثانیه)'
-$exe = Join-Path $Dir 'sarina.exe'
-
-# نمونه‌ی در حال اجرا را اول از مسیر خودش ذخیره کن، بعد ببند؛ وگرنه هم exe
-# قفل می‌ماند و هم یادگیریِ بعد از آخرین ذخیره از بین می‌رود.
-$old = Get-Process sarina -ErrorAction SilentlyContinue
-if ($old) {
-    try {
-        Invoke-WebRequest -Uri "http://localhost:$Port/shutdown" -UseBasicParsing -TimeoutSec 5 | Out-Null
-        Start-Sleep -Milliseconds 700
-        Ok 'مغز در brain.dat ذخیره شد'
-    } catch {
-        Warn 'نمونه‌ی قبلی پاسخ نداد؛ فقط فرایند بسته می‌شود (آخرین ذخیره محفوظ است).'
-    }
-    $old | Stop-Process -Force -ErrorAction SilentlyContinue
-}
-Start-Sleep -Milliseconds 600
-
-if (Test-Path $exe) {
-    Remove-Item $exe -Force -ErrorAction SilentlyContinue
-    if (Test-Path $exe) {
-        Fail 'فایل sarina.exe قفل است. پنجره‌ی سارینا را ببندید و دوباره اجرا کنید.'
-        return
-    }
-}
-
-$log = Join-Path $env:TEMP 'sarina_build.txt'
-
-# تلاش اول: پیوند ایستا (exe مستقل، بدون نیاز به DLL)
-& $gpp -O2 -std=c++17 -pthread sarina.cpp -o $exe -lws2_32 -static 2>&1 |
-    Tee-Object -FilePath $log | Out-Null
-
-# تلاش دوم: بدون -static (بعضی توزیع‌ها کتابخانه‌ی ایستا ندارند)
-if (-not (Test-Path $exe)) {
-    Warn 'پیوند ایستا نشد؛ تلاش بدون static …'
-    & $gpp -O2 -std=c++17 -pthread sarina.cpp -o $exe -lws2_32 2>&1 |
-        Tee-Object -FilePath $log -Append | Out-Null
-}
-
-if (-not (Test-Path $exe)) {
-    Fail 'کامپایل ناموفق بود. خروجی کامپایلر:'
-    Get-Content $log -Tail 30 | ForEach-Object { Write-Host "        $_" -ForegroundColor DarkRed }
-    Write-Host ''
-    Write-Host "  گزارش کامل: $log" -ForegroundColor DarkGray
-    return
-}
-Ok ("sarina.exe ساخته شد ({0} KB)" -f [math]::Round((Get-Item $exe).Length / 1KB, 0))
-Ok ("زمان بیلد: {0}" -f (Get-Item $exe).LastWriteTime.ToString('HH:mm:ss'))
-
-# --- ۵. اجرا ----------------------------------------------------------------
-Step 5 "اجرا روی پورت $Port"
-
-Get-Process sarina -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-Start-Sleep -Milliseconds 400
-
-# کاربری که قبلاً نسخه‌ی آنلاین را اجرا کرده، مغز آموزش‌دیده‌اش را در
-# %USERPROFILE%\sarina دارد. در اولین اجرای ZIP محلی آن را خودکار منتقل کن.
-$checkpoint = Join-Path $Dir 'brain.dat'
-$legacyCheckpoint = Join-Path (Join-Path $env:USERPROFILE 'sarina') 'brain.dat'
-if ($LocalMode -and -not (Test-Path $checkpoint) -and (Test-Path $legacyCheckpoint)) {
-    Copy-Item $legacyCheckpoint $checkpoint -Force
-    Ok 'brain.dat قبلی به پوشه‌ی محلی منتقل شد'
-}
-
-# در پنجره‌ی جداگانه اجرا می‌شود تا بسته شدن این پاورشل مغز را نکشد.
-# اگر چک‌پوینت داریم همان مغز ادامه می‌دهد؛ داده‌ی آموزش داخل کد نیست.
-$runArgs = "--neurons $Neurons --port $Port --words persian_words.tsv"
-if (Test-Path $checkpoint) {
-    $runArgs += ' --load brain.dat'
-    Ok 'ادامه از brain.dat'
-} else {
-    Ok 'مغز تازه (چک‌پوینتی پیدا نشد)'
-}
-$proc = Start-Process -FilePath $exe `
-        -ArgumentList $runArgs `
-        -PassThru -WorkingDirectory $Dir
-
-$url   = "http://localhost:$Port"
-$ready = $false
-foreach ($i in 1..40) {
-    Start-Sleep -Milliseconds 500
-    if ($proc.HasExited) {
-        Fail 'برنامه بلافاصله بسته شد.'
-        Write-Host "  احتمالاً پورت $Port اشغال است. با پورت دیگری امتحان کنید:" -ForegroundColor Yellow
-        Write-Host "     cd `"$Dir`"; .\sarina.exe --port 9000" -ForegroundColor White
-        return
-    }
-    try {
-        $r = Invoke-WebRequest -Uri "$url/stats" -UseBasicParsing -TimeoutSec 2
-        if ($r.StatusCode -eq 200) { $ready = $true; break }
-    } catch { }
-}
+function Info($s) { Write-Host "  $s" -ForegroundColor Cyan }
+function Good($s) { Write-Host "  $s" -ForegroundColor Green }
+function Warn($s) { Write-Host "  $s" -ForegroundColor Yellow }
+function Fail($s) { Write-Host "  [!] $s" -ForegroundColor Red }
 
 Write-Host ''
-if ($ready) {
-    Write-Host '  ================================================' -ForegroundColor Green
-    Write-Host '    مغز زنده است' -ForegroundColor Green
-    Write-Host '  ================================================' -ForegroundColor Green
-    Write-Host ''
-    Write-Host "  داشبورد : $url" -ForegroundColor Cyan
-    Write-Host '            (مرورگر خودکار باز می‌شود)' -ForegroundColor DarkGray
-    Write-Host ''
-    Write-Host '  پنجره‌ی سیاه سارینا را باز نگه دارید.' -ForegroundColor Yellow
-    Write-Host "  توقف    : Stop-Process -Id $($proc.Id)" -ForegroundColor DarkGray
-    Write-Host ''
-} else {
-    Warn "سرور پاسخ نداد. شاید پورت $Port اشغال است."
-    Write-Host '  اجرای دستی با پورت دیگر:' -ForegroundColor White
-    Write-Host "     cd `"$Dir`"; .\sarina.exe --port 9000" -ForegroundColor White
+Write-Host '  ===============================================' -ForegroundColor Cyan
+Write-Host '    smile — local compute test' -ForegroundColor Cyan
+Write-Host '  ===============================================' -ForegroundColor Cyan
+Write-Host "  folder: $Dir"
+Write-Host ''
+
+# Preserve a running CPU checkpoint before rebuilding.
+$oldCpu = Get-Process smile -ErrorAction SilentlyContinue
+if ($oldCpu) {
+    try {
+        Invoke-WebRequest "http://localhost:$Port/shutdown" -UseBasicParsing -TimeoutSec 5 | Out-Null
+        Start-Sleep -Milliseconds 700
+        Good 'brain.dat saved'
+    } catch { Warn 'CPU process did not answer; using its last checkpoint.' }
+    $oldCpu | Stop-Process -Force -ErrorAction SilentlyContinue
 }
+Get-Process smile-gpu -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
+function Find-Tool($name, $candidates) {
+    $cmd = Get-Command $name -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    foreach ($p in $candidates) { if ($p -and (Test-Path $p)) { return $p } }
+    return $null
+}
+
+$nvsmi = Find-Tool 'nvidia-smi' @("$env:ProgramFiles\NVIDIA Corporation\NVSMI\nvidia-smi.exe", "$env:WINDIR\System32\nvidia-smi.exe")
+$cudaCandidates = @()
+if ($env:CUDA_PATH) { $cudaCandidates += (Join-Path $env:CUDA_PATH 'bin\nvcc.exe') }
+$cudaRoot = "$env:ProgramFiles\NVIDIA GPU Computing Toolkit\CUDA"
+if (Test-Path $cudaRoot) {
+    $cudaCandidates += Get-ChildItem $cudaRoot -Directory -ErrorAction SilentlyContinue |
+        Sort-Object Name -Descending | ForEach-Object { Join-Path $_.FullName 'bin\nvcc.exe' }
+}
+$nvcc = Find-Tool 'nvcc' $cudaCandidates
+
+function Import-VsEnvironment {
+    if (Get-Command cl.exe -ErrorAction SilentlyContinue) { return $true }
+    $vswhere = "$env:ProgramFiles(x86)\Microsoft Visual Studio\Installer\vswhere.exe"
+    if (-not (Test-Path $vswhere)) { return $false }
+    $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+    if (-not $vs) { return $false }
+    $vcvars = Join-Path $vs 'VC\Auxiliary\Build\vcvars64.bat'
+    if (-not (Test-Path $vcvars)) { return $false }
+    cmd /c "`"$vcvars`" >nul && set" | ForEach-Object {
+        if ($_ -match '^([^=]+)=(.*)$') { Set-Item -Path "Env:$($matches[1])" -Value $matches[2] }
+    }
+    return [bool](Get-Command cl.exe -ErrorAction SilentlyContinue)
+}
+
+$hasNvidia = $false
+$gpuName = ''
+$compute = ''
+if ($nvsmi) {
+    try {
+        $gpuName = (& $nvsmi --query-gpu=name --format=csv,noheader,nounits | Select-Object -First 1).Trim()
+        $compute = (& $nvsmi --query-gpu=compute_cap --format=csv,noheader,nounits | Select-Object -First 1).Trim()
+        $hasNvidia = [bool]$gpuName
+    } catch {
+        try { $gpuName = (& $nvsmi --query-gpu=name --format=csv,noheader | Select-Object -First 1).Trim(); $hasNvidia=[bool]$gpuName } catch { }
+    }
+}
+
+if (-not $Cpu -and $hasNvidia) {
+    Info "NVIDIA GPU: $gpuName"
+    if ($compute) { Info "compute capability: $compute" }
+    if (-not $nvcc) {
+        Fail 'CUDA Toolkit compiler (nvcc) was not found.'
+        Write-Host ''
+        Write-Host '  Install requirements, restart PowerShell, then run this script again:' -ForegroundColor Yellow
+        Write-Host '  1) Visual Studio Build Tools 2022 → Desktop development with C++'
+        Write-Host '  2) CUDA Toolkit'
+        Write-Host '     GTX 900/10 series: use CUDA 12.9 (CUDA 13 cannot compile for pre-Turing GPUs).'
+        Write-Host '     GTX 16 series: CUDA 12.9 or 13.x.'
+        Write-Host ''
+        Write-Host '  CPU fallback now:  .\run.ps1 -Cpu' -ForegroundColor Cyan
+        exit 3
+    }
+    if (-not (Import-VsEnvironment)) {
+        Fail 'MSVC cl.exe was not found; nvcc on Windows needs Visual Studio C++ Build Tools.'
+        Write-Host '  Install: winget install Microsoft.VisualStudio.2022.BuildTools'
+        Write-Host '  In Visual Studio Installer select: Desktop development with C++'
+        exit 4
+    }
+
+    $nvccText = (& $nvcc --version 2>&1 | Out-String)
+    $cudaMajor = 0
+    if ($nvccText -match 'release\s+(\d+)\.') { $cudaMajor = [int]$matches[1] }
+    if ($compute -match '^(\d+)\.(\d+)$') {
+        $ccNumber = [int]$matches[1] * 10 + [int]$matches[2]
+        if ($ccNumber -lt 75 -and $cudaMajor -ge 13) {
+            Fail "CUDA $cudaMajor cannot compile for compute $compute. Install CUDA 12.9 for this GTX."
+            exit 5
+        }
+        $arch = "sm_$ccNumber"
+    } else {
+        $arch = 'native'
+        Warn 'compute capability query unavailable; nvcc will use -arch=native.'
+    }
+
+    if (-not (Test-Path '.\smile_cuda.cu')) { Fail 'smile_cuda.cu is missing.'; exit 2 }
+    $gpuExe = Join-Path $Dir 'smile-gpu.exe'
+    Remove-Item $gpuExe -Force -ErrorAction SilentlyContinue
+    $log = Join-Path $env:TEMP 'smile_cuda_build.txt'
+    Info "building CUDA core ($arch)..."
+    & $nvcc -O3 -std=c++17 "-arch=$arch" .\smile_cuda.cu -o $gpuExe 2>&1 |
+        Tee-Object -FilePath $log | Out-Null
+    if (-not (Test-Path $gpuExe)) {
+        Fail 'CUDA build failed:'
+        Get-Content $log -Tail 40 | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkRed }
+        Write-Host "  full log: $log"
+        exit 6
+    }
+    Good "built: $gpuExe"
+    Info "running 32,000 real neurons; GPU utilization ceiling = $GpuLimit%; duration = $Seconds s"
+    Write-Host '  A value below 70% is valid: fixed 32k may be too small for the GPU.' -ForegroundColor Yellow
+    Write-Host ''
+    & $gpuExe --neurons 32000 --gpu-limit $GpuLimit --seconds $Seconds --device $Device
+    exit $LASTEXITCODE
+}
+
+# Portable CPU fallback with the complete dashboard/teacher/checkpoint path.
+if (-not (Test-Path '.\smile.cpp')) { Fail 'smile.cpp is missing.'; exit 2 }
+if (-not (Test-Path '.\persian_words.tsv')) { Fail 'persian_words.tsv is missing.'; exit 2 }
+$gpp = Find-Tool 'g++' @('C:\msys64\ucrt64\bin\g++.exe','C:\msys64\mingw64\bin\g++.exe','C:\mingw64\bin\g++.exe')
+if (-not $gpp) { Fail 'g++ was not found. Install MSYS2/UCRT64 or run on the CUDA machine after installing its tools.'; exit 7 }
+$cpuExe = Join-Path $Dir 'smile.exe'
+Remove-Item $cpuExe -Force -ErrorAction SilentlyContinue
+Info 'building portable CPU fallback...'
+& $gpp -O2 -std=c++17 -pthread .\smile.cpp -o $cpuExe -lws2_32 -static
+if (-not (Test-Path $cpuExe)) { Fail 'CPU build failed.'; exit 8 }
+$args = '--neurons 32000 --port 8420 --words persian_words.tsv'
+if (Test-Path '.\brain.dat') { $args += ' --load brain.dat'; Good 'continuing brain.dat' }
+Start-Process $cpuExe -ArgumentList $args -WorkingDirectory $Dir
+Start-Sleep 2
+Start-Process 'http://localhost:8420'
+Good 'CPU dashboard: http://localhost:8420'

@@ -1,13 +1,13 @@
 // ============================================================================
-//  سارینا — فاز ۲: یادگیری فارسی خودکار
-//  Sarina — Phase 2 prototype
+//  smile — فاز ۲: یادگیری فارسی خودکار
+//  smile — Phase 2 prototype
 //
 //  یک مغز دیجیتال رویدادمحور. تک‌فایل، بدون وابستگی.
 //  هدف این مرحله: پاسخ به تنها سؤالی که با فکر کردن حل نمی‌شود —
 //      «آیا اقتصاد مانا به تعادل زنده می‌رسد یا به انفجار/انجماد می‌افتد؟»
 //
-//  build:  g++ -O2 -std=c++17 -pthread sarina.cpp -o sarina
-//  run:    ./sarina [--neurons N] [--port P] [--seed S] [--load brain.dat]
+//  build:  g++ -O2 -std=c++17 -pthread smile.cpp -o smile
+//  run:    ./smile [--neurons N] [--port P] [--seed S] [--load brain.dat]
 //
 //  مرجع: ARCHITECTURE.md  (پیش‌نویس ۰٫۳)
 // ============================================================================
@@ -1614,7 +1614,7 @@ static void device_score(u32 word_id, int score) {
 static bool save_brain(const char* path) {
     FILE* f = fopen(path, "wb");
     if (!f) return false;
-    const char magic[8] = {'S','A','R','I','N','A','0','3'};
+    const char magic[8] = {'S','M','I','L','E','0','0','4'};
     fwrite(magic, 1, 8, f);
     u32 nprog = (u32)g_progs.size(); fwrite(&nprog, 4, 1, f);
     for (auto& p : g_progs) {
@@ -1653,7 +1653,14 @@ static bool load_brain(const char* path) {
     FILE* f = fopen(path, "rb");
     if (!f) return false;
     char magic[8];
-    if (fread(magic,1,8,f) != 8 || memcmp(magic,"SARINA03",8)) { fclose(f); return false; }
+    const char current_magic[8] = {'S','M','I','L','E','0','0','4'};
+    // Legacy checkpoint signature is kept as byte values so old trained brains
+    // remain loadable without exposing the previous temporary codename.
+    const unsigned char legacy_magic[8] = {0x53,0x41,0x52,0x49,0x4E,0x41,0x30,0x33};
+    if (fread(magic,1,8,f) != 8 ||
+        (memcmp(magic,current_magic,8) && memcmp(magic,legacy_magic,8))) {
+        fclose(f); return false;
+    }
     u32 nprog = 0; if (fread(&nprog,4,1,f)!=1) { fclose(f); return false; }
     g_progs.clear(); g_progs.resize(nprog);
     for (u32 i = 0; i < nprog; ++i) {
@@ -2189,7 +2196,7 @@ static void sim_loop() {
 static const char* PAGE = R"HTML(<!DOCTYPE html>
 <html lang="fa" dir="rtl"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>سارینا — فاز ۲</title>
+<title>smile — فاز ۲</title>
 <style>
 *{box-sizing:border-box}
 body{margin:0;background:#0a0d12;color:#dfe7f0;font:14px/1.7 Vazirmatn,Tahoma,system-ui,sans-serif}
@@ -2287,7 +2294,7 @@ select{background:#141d29;color:#dfe7f0;border:1px solid #2a3a52;border-radius:6
 .v-bad{background:#2a1010;border:1px solid #6b1e1e;color:#ff9b9b}
 </style></head><body>
 <header>
-  <h1>سارینا</h1>
+  <h1>smile</h1>
   <span class="tag">فاز ۲ · معلم خودکار</span>
   <span class="tag" title="تاریخ کامپایل — اگر قدیمی است، دوباره بساز">بیلد )HTML" __DATE__ " " __TIME__ R"HTML(</span>
   <span class="tag" id="vt">—</span>
@@ -2893,7 +2900,7 @@ int main(int argc, char** argv) {
 
     printf("\n");
     printf("  ╔═══════════════════════════════════════════════╗\n");
-    printf("  ║   سارینا — فاز ۲                              ║\n");
+    printf("  ║   smile — فاز ۲                              ║\n");
     printf("  ║   یک مغز دیجیتال رویدادمحور                   ║\n");
     printf("  ╚═══════════════════════════════════════════════╝\n\n");
 

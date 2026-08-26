@@ -1,109 +1,115 @@
-# سارینا
+# smile
 
-یک مغز دیجیتال رویدادمحور با اقتصاد محلی مانا، حافظه‌ی نورونی، مرگ، ورودی/خروجی فارسی و آموزش پاداش‌محور. این پروژه مدل زبانی کلاسیک نیست.
+Temporary anonymous compute prototype for a local CPU/CUDA validation run.
 
-## فایل‌ها
+## Files
 
-- `sarina.cpp` — تمام موتور، VM، شبکه، دستگاه زبان و داشبورد
-- `persian_words.tsv` — داده‌ی مستقل معلم فارسی (`واژه<TAB>فراوانی`)
-- `brain.dat` — چک‌پوینت ساخته‌شده در زمان اجرا (در Git ذخیره نمی‌شود)
+- `smile.cpp` — complete CPU application: event engine, Persian teacher, dashboard and checkpoint
+- `smile_cuda.cu` — CUDA validation core for the real normal/memory neuron VM
+- `persian_words.tsv` — UTF-8 Persian teacher data
+- `run.ps1` — local Windows build/run script
+- `brain.dat` — generated checkpoint
 
-کد همچنان تک‌فایل است؛ واژه‌نامه عمداً از کد جدا نگه داشته شده تا بدون کامپایل مجدد قابل تعویض باشد.
+## CUDA test on Windows
 
-## دانلود کامل پروژه روی لپ‌تاپ ویندوزی
+Requirements:
 
-[دانلود ZIP کامل همین شاخه](https://github.com/bomb-xray/sarina/archive/refs/heads/arena/01a00c33-sarina.zip)
+1. NVIDIA driver (`nvidia-smi` must work)
+2. Visual Studio 2022 Build Tools with **Desktop development with C++**
+3. CUDA Toolkit (`nvcc --version` must work)
 
-1. فایل ZIP را Extract کنید.
-2. داخل پوشه‌ی استخراج‌شده PowerShell باز کنید.
-3. اجرا کنید:
+Toolkit compatibility matters:
+
+- GTX 900 and GTX 10 series (compute capability below 7.5): use **CUDA 12.9**. CUDA 13 removed offline compilation for these GPUs.
+- GTX 16 series (Turing, 7.5): CUDA 12.9 or CUDA 13.x.
+
+Open PowerShell in this folder:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\run.ps1
 ```
 
-اسکریپت تشخیص می‌دهد که از فایل محلی اجرا شده و **همان `sarina.cpp` و `persian_words.tsv` داخل پوشه** را کامپایل می‌کند؛ چیزی را در پوشه‌ی دیگری دانلود نمی‌کند. `sarina.exe` و `brain.dat` نیز همان‌جا ساخته می‌شوند و کل پروژه دست خودتان می‌ماند. اگر قبلاً نسخه‌ی آنلاین را اجرا کرده باشید، در اولین اجرا چک‌پوینت `%USERPROFILE%\sarina\brain.dat` نیز خودکار به پوشه‌ی جدید منتقل می‌شود.
+Defaults:
 
-اگر Git نصب است، روش جایگزین:
-
-```powershell
-git clone --branch arena/01a00c33-sarina --single-branch https://github.com/bomb-xray/sarina.git
-cd sarina
-powershell -ExecutionPolicy Bypass -File .\run.ps1
+```text
+neurons       32,000 (fixed real brain, no synthetic duplication)
+GPU ceiling   70%
+duration      120 seconds
+device        0
 ```
 
-## نصب/به‌روزرسانی آنلاین روی ویندوز
-
-در PowerShell:
+Custom duration or ceiling:
 
 ```powershell
-irm https://raw.githubusercontent.com/bomb-xray/sarina/arena/01a00c33-sarina/run.ps1 | iex
+powershell -ExecutionPolicy Bypass -File .\run.ps1 -GpuLimit 70 -Seconds 300
 ```
 
-در حالت آنلاین اسکریپت `sarina.cpp` و `persian_words.tsv` را در `%USERPROFILE%\sarina` نگه می‌دارد. در هر دو حالت، نمونه‌ی در حال اجرا ابتدا امن در `brain.dat` ذخیره می‌شود و اگر چک‌پوینت موجود باشد همان مغز ادامه می‌یابد. داشبورد روی <http://localhost:8420> باز می‌شود. به URL پارامتر تصادفی `?v=...` اضافه نکنید؛ GitHub Raw ممکن است پاسخ 403 بدهد.
+The script detects the GPU compute capability, builds the native `sm_XX` target, runs the CUDA core and prints every half second:
 
-## ساخت دستی
+- actual NVML GPU utilization and the configured ceiling
+- controller duty cycle
+- temperature
+- virtual-time speed
+- firing rate
+- signals and dropped signal count
 
-### Linux / macOS
+### Important interpretation
+
+`70%` is a **ceiling**, not fake target padding. With only 32,000 real neurons, a strong GTX may naturally remain below 70%. The program does not duplicate work just to make Task Manager show a larger number.
+
+On Windows Task Manager select the GPU graph named **CUDA** or **Compute**, not only `3D`. The console's NVML value is the primary measurement.
+
+A thermal guard reduces duty at 85°C and stops at 90°C.
+
+## What the CUDA validation core really executes
+
+- 1 ms dependency windows
+- CUDA Graph launch path when supported
+- the same linear bytecode programs for normal neurons
+- the same semi-linear bytecode programs and 1 KB local memory for memory neurons
+- 20/40 real edges per neuron with 1–20 ms delay
+- signal ring, input freshness and output masks
+- per-neuron mana, firing cost, upkeep, lobe pools and delayed return
+- fixed 14-neuron mouth bottleneck
+- normal/memory population on GPU; giant population is counted as host-side work
+
+This is not a matrix-multiplication stress test. It validates the mass-neuron CUDA architecture. The first CUDA run intentionally does **not** replace the complete CPU application yet: teacher scoring, exact causal feedback, dashboard and CPU↔giant signal exchange stay in `smile.cpp` until the hardware test confirms kernel correctness and throughput.
+
+## CPU fallback
+
+The full portable application remains available:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\run.ps1 -Cpu
+```
+
+It builds `smile.exe`, continues `brain.dat` when present, and opens:
+
+```text
+http://localhost:8420
+```
+
+Manual build on Linux/macOS:
 
 ```bash
-g++ -O2 -std=c++17 -pthread sarina.cpp -o sarina
-./sarina --neurons 32000 --port 8420 --words persian_words.tsv
+g++ -O2 -std=c++17 -pthread smile.cpp -o smile
+./smile --neurons 32000 --port 8420 --words persian_words.tsv
 ```
 
-### Windows / MinGW
-
-```powershell
-g++ -O2 -std=c++17 -pthread sarina.cpp -o sarina.exe -lws2_32 -static
-.\sarina.exe --neurons 32000 --port 8420 --words persian_words.tsv
-```
-
-## معلم خودکار
-
-معلم فقط خروجی را مشاهده و سیگنال مانا تولید می‌کند؛ مستقیماً حافظه یا سیم‌کشی مغز را تغییر نمی‌دهد. حالت‌ها:
-
-| مقدار | حالت |
-|---:|---|
-| `0` | خاموش؛ فقط نمره‌دهی دستی |
-| `1` | **املایی:** طبیعی‌بودن ترتیب حروف با مدل دو/سه‌حرفی؛ عضو دیکشنری بودن لازم نیست |
-| `2` | **دیکشنری:** عضویت دقیق و فراوانی؛ ناشناخته امتیاز دیکشنری صفر می‌گیرد |
-| `3` | **ترکیبی:** ۵۵٪ املایی + ۴۵٪ دیکشنری (پیش‌فرض) |
+Manual CUDA build on Linux (add your GPU architecture):
 
 ```bash
-./sarina --teacher 3 --teacher-strength 35 --words persian_words.tsv
+nvcc -O3 -std=c++17 -arch=sm_75 smile_cuda.cu -o smile-gpu -ldl
+./smile-gpu --neurons 32000 --gpu-limit 70 --seconds 120
 ```
 
-امتیاز خودکار عمداً ضعیف است (حداکثر حدود ±۰٫۵ برای اعتبار هر واژه و فقط یک‌هشتم آن برای استخر لوب) و نمره‌ی دستی `±10` همچنان فرمان قوی‌تر است. هر واژه یک ردپای علّی از نورون‌های سازنده نگه می‌دارد تا اعتبار به همان مسیر برسد، نه تمام نورون‌های لوب.
+## Test report to keep
 
-### اعداد داشبورد معلم
+After the run, keep or send:
 
-- **املا / دیکشنری / کیفیت نهایی:** ارزیابی ۰ تا ۱۰۰؛ هنوز مانا نیست.
-- **خط پایه:** میانگین متحرک کیفیت خروجی‌های اخیر؛ برای هر نوع معلم مستقل است.
-- **مزیت:** کیفیت نهایی منهای خط پایه، پس بهترشدن نسبت به رفتار قبلی مهم است.
-- **سیگنال معلم:** عدد واقعی اعمال‌شده به اعتبار مسیر، بین `−0.5` و `+0.5`.
-- **نمره دستی:** فرمان مستقل انسان و معمولاً بسیار قوی‌تر.
+```powershell
+nvidia-smi
+nvcc --version
+```
 
-داشبورد برای ۲۵ واژه‌ی آخر جدول کامل این اعداد را نشان می‌دهد و برای هر یک از سه نوع معلم، تعداد نمونه، میانگین کیفیت و میانگین سیگنال را جدا نگه می‌دارد.
-
-## گزینه‌های مهم
-
-| گزینه | کار |
-|---|---|
-| `--neurons N` | تعداد نورون؛ پیش‌فرض ۳۲۰۰۰ |
-| `--port P` | پورت داشبورد؛ پیش‌فرض ۸۴۲۰ |
-| `--seed S` | بذر اجرای تکرارپذیر |
-| `--load brain.dat` | ادامه از چک‌پوینت |
-| `--headless N` | اجرای بدون داشبورد برای N ثانیه‌ی مجازی |
-| `--threads N` | تعداد نخ؛ صفر یعنی تشخیص خودکار |
-| `--cpu N` | سقف چرخه‌ی کاری CPU، از ۱۰ تا ۱۰۰٪ |
-| `--speed N` | سرعت بر حسب هزارم زمان واقعی؛ صفر یعنی بیشینه |
-| `--words PATH` | مسیر فایل داده‌ی فارسی |
-| `--teacher 0..3` | حالت معلم خودکار |
-| `--teacher-strength 0..100` | قدرت سیگنال خودکار |
-| `--no-browser` | مرورگر را خودکار باز نکند |
-
-## منبع داده
-
-`persian_words.tsv` از فهرست فارسی OpenSubtitles 2018 در پروژه‌ی [FrequencyWords](https://github.com/hermitdave/FrequencyWords) مشتق شده است. داده نرمال‌سازی و به واژه‌های فارسی با فراوانی حداقل ۲ محدود شده و تحت مجوز [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/) توزیع می‌شود.
-
-جزئیات طراحی و نتایج آزمایش‌ها در [`ARCHITECTURE.md`](ARCHITECTURE.md) است.
+and the full `smile-gpu.exe` console output. The critical fields are GPU utilization, virtual speed, signal drops, temperature and compute capability.
