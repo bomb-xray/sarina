@@ -53,6 +53,7 @@
   #define INVALID_SOCKET (-1)
 #endif
 
+using i16 = int16_t;
 using i32 = int32_t;
 using i64 = int64_t;
 using u8  = uint8_t;
@@ -202,7 +203,8 @@ struct Neuron {
 
     i64  mana     = 0;               // میلی‌مانا
     i64  cap      = 0;
-    u16  credit   = 0;               // اعتبار — ۲ بایت (بند ۱۶٫۶)؛ ۸ بیتی هم کافی است
+    u16  credit   = 0;               // اعتبار فعالیت کوتاه‌مدت
+    i16  plasticity = 0;             // اثر پاداش علّی بلندمدت: −۸۱۹۲..+۸۱۹۲
     i64  dcredit  = 0;               // اعتبار پایانی برای اسپم
 
     vtime last_eval  = 0;
@@ -359,6 +361,8 @@ struct Stats {
     i64 words_total = 0, words_scored = 0;
     i64 words_auto = 0, words_manual = 0, words_exact = 0;
     i64 words_positive = 0, words_negative = 0, words_neutral = 0;
+    i64 plasticity_positive = 0, plasticity_negative = 0;
+    double plasticity_avg = 0;
     double avg_score = 0, avg_quality = 0, teacher_baseline = 0;
     double teacher_baseline_by_mode[4] = {0,0,0,0};
     i64 auto_reward_total = 0;
@@ -446,8 +450,9 @@ static std::atomic<int>  g_talkativeness{100};   // ۱۰..۴۰۰ ٪ — کنتر
 // --- معلم خودکار واژه (فاز ۲) ---
 // ۰ خاموش · ۱ املایی/ngram · ۲ دیکشنری · ۳ ترکیبی
 static std::atomic<int>  g_teacher_mode{3};
-static std::atomic<int>  g_teacher_strength{35}; // ۰..۱۰۰؛ بسیار ضعیف‌تر از نمره‌ی دستی
+static std::atomic<int>  g_teacher_strength{0};  // پیش‌فرض فقط داوری؛ آموزش خودکار هنوز A/B را نبرده
 static std::string       g_words_path = "persian_words.tsv";
+static std::string       g_user_words_path = "my_words.tsv";
 
 struct PendingFeedback {
     std::vector<u32> trace;
@@ -1008,6 +1013,12 @@ static void apply_pending_feedback() {
             i64 delta = (i64)std::llround(6000.0 * mag * lobe_weight) * sign;
             i64 next = (i64)nu.credit + delta;
             nu.credit = (u16)std::max<i64>(0, std::min<i64>(65535, next));
+            // credit فقط اقتصاد را عوض می‌کرد و در آزمون A/B هیچ رفتار خروجی
+            // را تغییر نداد. plasticity مستقیماً نرخ/گیت فایر همان مسیر علّی
+            // را تغییر می‌دهد و آهسته باقی می‌ماند.
+            i64 pdelta = (i64)std::llround(2500.0 * mag * lobe_weight) * sign;
+            i64 pnext = (i64)nu.plasticity + pdelta;
+            nu.plasticity = (i16)std::max<i64>(-8192, std::min<i64>(8192, pnext));
         }
     }
 }
@@ -1165,21 +1176,23 @@ static void system_tick() {
 //  فاصله جداکننده‌ی کلمات است و به کلمه‌ی قبلش می‌چسبد.
 // ---------------------------------------------------------------------------
 // ---------------------------------------------------------------------------
-//  الفبای خروجی — ۶ بیت = ۶۴ نماد، همه فارسیِ معتبر (بند ۱۱٫۱)
+//  الفبای خروجی — ۶ بیت = ۶۴ نماد (بند ۱۱٫۱)
 //
-//  چرا نه بایت خام UTF-8؟ چون فارسی دوبایتی است و شانس آماری‌اش در برابر
-//  ASCII حدود ۱ به ۱۲ است — به‌علاوه باید دو بایت مشخص پشت هم بیایند.
-//  با الفبای مستقیم، هر خروجیِ مدل از روز اول فارسیِ خواناست.
+//  فقط ۳۲ حرف فارسی + آ + چهار نشانه نگه داشته شده‌اند. شکل‌های عربیِ
+//  همزه‌دار، ارقام و نشانه‌های کم‌کاربرد حذف شدند؛ خانه‌های اضافه با فاصله
+//  و حروف پرتکرار فارسی پر شده‌اند. تکرار یک نماد فقط وزن کدک است و حرف
+//  تازه‌ای به زبان اضافه نمی‌کند.
 // ---------------------------------------------------------------------------
+static constexpr int PERSIAN_LETTER_COUNT = 33;
 static const char* PERSIAN_ALPHABET[64] = {
     " ", "ا", "ب", "پ", "ت", "ث", "ج", "چ",
     "ح", "خ", "د", "ذ", "ر", "ز", "ژ", "س",
     "ش", "ص", "ض", "ط", "ظ", "ع", "غ", "ف",
     "ق", "ک", "گ", "ل", "م", "ن", "و", "ه",
-    "ی", "آ", "أ", "ؤ", "ئ", "ة", "ء", "،",
-    ".", "؟", "!", ":", "؛", "-", "«", "»",
-    "۰", "۱", "۲", "۳", "۴", "۵", "۶", "۷",
-    "۸", "۹", " ", " ", " ", " ", " ", " "
+    "ی", "آ", "،", ".", "؟", "!", " ", " ",
+    " ", " ", " ", " ", " ", "ا", "ا", "ا",
+    "ن", "ن", "ر", "ر", "ی", "ی", "ی", "م",
+    "م", "و", "و", "د", "ه", "ه", "ب", "ت"
 };
 
 // نگاشت معکوس برای ورودی انسان
@@ -1192,7 +1205,8 @@ static int persian_index(const std::string& ch) {
 // ---------------------------------------------------------------------------
 //  معلم خودکار فارسی — فایل داده بیرون از کد می‌ماند
 //
-//  فرمت: واژه<TAB>فراوانی، UTF-8. از همان فایل هم جدول واژه و هم مدل
+//  فرمت v2: واژه<TAB>فراوانی<TAB>وضعیت<TAB>یادداشت، UTF-8.
+//  پایه‌ی curated با my_words.tsv ادغام می‌شود و از verifiedها مدل
 //  دو/سه‌حرفی ساخته می‌شود. بنابراین داوری فقط صفر/یک نیست و خروجیِ نزدیک
 //  به فارسی نیز سیگنال ضعیف می‌گیرد؛ وگرنه مغز در ابتدای کار فقط تنبیه
 //  می‌بیند و سکوت را یاد می‌گیرد.
@@ -1202,6 +1216,9 @@ static constexpr int TEACH_BOUNDARY = 64;
 
 struct TeacherLexicon {
     std::unordered_map<std::string,u32> freq;
+    std::unordered_set<std::string> verified;
+    std::unordered_set<std::string> suggested;
+    std::unordered_set<std::string> blocked;
     std::vector<u64> bigram = std::vector<u64>((size_t)TEACH_V * TEACH_V, 0);
     std::vector<u64> trigram = std::vector<u64>((size_t)TEACH_V * TEACH_V * TEACH_V, 0);
     u64 max_freq = 1;
@@ -1221,7 +1238,8 @@ static void replace_all(std::string& s, const std::string& from, const std::stri
 static std::string normalize_word(std::string s) {
     replace_all(s, "ي", "ی"); replace_all(s, "ى", "ی");
     replace_all(s, "ك", "ک"); replace_all(s, "ۀ", "ه");
-    replace_all(s, "ة", "ه"); replace_all(s, "إ", "ا");
+    replace_all(s, "ة", "ه"); replace_all(s, "إ", "ا"); replace_all(s, "أ", "ا");
+    replace_all(s, "ؤ", "و"); replace_all(s, "ئ", "ی"); replace_all(s, "ء", "");
     replace_all(s, "ٱ", "ا"); replace_all(s, "ـ", "");
     replace_all(s, "‌", "");  replace_all(s, "ٔ", "");
     const char* marks[] = {"َ","ِ","ُ","ّ","ْ","ً","ٍ","ٌ"};
@@ -1239,8 +1257,8 @@ static bool word_symbols(const std::string& word, std::vector<int>& out) {
         if (i + n > word.size()) return false;
         std::string ch = word.substr(i, n);
         int k = persian_index(ch);
-        // اندیس صفر فاصله است و درون واژه پذیرفته نیست.
-        if (k <= 0 || k >= 39) return false;
+        // فقط شناسه‌های canonical حروف فارسی؛ تکرارهای وزنی و نشانه‌ها واژه نیستند.
+        if (k <= 0 || k > PERSIAN_LETTER_COUNT) return false;
         out.push_back(k);
         i += n;
     }
@@ -1248,50 +1266,89 @@ static bool word_symbols(const std::string& word, std::vector<int>& out) {
 }
 
 static bool load_teacher_data(const std::string& path) {
-    std::ifstream f(path, std::ios::binary);
-    if (!f) { g_lexicon.error = "فایل داده پیدا نشد: " + path; return false; }
-
-    g_lexicon.freq.clear();
-    g_lexicon.freq.reserve(200000);
+    g_lexicon.freq.clear(); g_lexicon.verified.clear();
+    g_lexicon.suggested.clear(); g_lexicon.blocked.clear();
+    g_lexicon.freq.reserve(120000); g_lexicon.verified.reserve(120000);
     std::fill(g_lexicon.bigram.begin(), g_lexicon.bigram.end(), 0);
     std::fill(g_lexicon.trigram.begin(), g_lexicon.trigram.end(), 0);
     g_lexicon.max_freq = 1;
 
-    std::string line;
     std::vector<int> syms;
-    while (std::getline(f, line)) {
-        if (line.empty() || line[0] == '#') continue;
-        size_t p = line.find('\t');
-        if (p == std::string::npos) p = line.find_last_of(' ');
-        std::string word = normalize_word(line.substr(0, p));
-        u64 n = 1;
-        if (p != std::string::npos) {
-            try { n = std::max<u64>(1, std::stoull(line.substr(p + 1))); }
-            catch (...) { n = 1; }
+    auto load_file = [&](const std::string& file, bool required) -> bool {
+        std::ifstream f(file, std::ios::binary);
+        if (!f) {
+            if (required) g_lexicon.error = "فایل داده پیدا نشد: " + file;
+            return !required;
         }
-        if (!word_symbols(word, syms) || syms.size() > 12) continue;
-        u64 sum = (u64)g_lexicon.freq[word] + n;
-        g_lexicon.freq[word] = (u32)std::min<u64>(sum, UINT32_MAX);
-        g_lexicon.max_freq = std::max(g_lexicon.max_freq, n);
-    }
+        std::string line;
+        while (std::getline(f, line)) {
+            if (line.size() >= 3 && (unsigned char)line[0] == 0xEF &&
+                (unsigned char)line[1] == 0xBB && (unsigned char)line[2] == 0xBF)
+                line.erase(0, 3);
+            if (line.empty() || line[0] == '#') continue;
+            std::vector<std::string> col;
+            size_t p = 0;
+            while (true) {
+                size_t q = line.find('\t', p);
+                col.push_back(line.substr(p, q == std::string::npos ? q : q - p));
+                if (q == std::string::npos) break;
+                p = q + 1;
+            }
+            if (col.empty()) continue;
+            std::string word = normalize_word(col[0]);
+            if (!word_symbols(word, syms) || syms.size() > 12) continue;
+            u64 n = 1;
+            if (col.size() > 1) {
+                try { n = std::max<u64>(1, std::stoull(col[1])); } catch (...) { n = 1; }
+            }
+            std::string status = col.size() > 2 ? col[2] : "verified";
+            for (char& c : status) if (c >= 'A' && c <= 'Z') c = (char)(c + 32);
+            bool is_block = status == "blocked" || status == "block" || status == "مسدود";
+            bool is_suggest = status == "suggested" || status == "suggest" || status == "پیشنهاد";
+            bool is_verify = status.empty() || status == "verified" || status == "verify" || status == "تایید";
+            if (is_block) {
+                g_lexicon.blocked.insert(word); g_lexicon.verified.erase(word);
+                g_lexicon.suggested.erase(word); g_lexicon.freq.erase(word); continue;
+            }
+            if (is_suggest) {
+                g_lexicon.suggested.insert(word); g_lexicon.verified.erase(word);
+                g_lexicon.freq.erase(word); continue;
+            }
+            if (!is_verify) continue;
+            g_lexicon.blocked.erase(word); g_lexicon.suggested.erase(word);
+            g_lexicon.verified.insert(word);
+            g_lexicon.freq[word] = (u32)std::min<u64>(n, UINT32_MAX);
+        }
+        g_lexicon.loaded_path += (g_lexicon.loaded_path.empty() ? "" : " + ") + file;
+        return true;
+    };
 
-    // وزن ریشه‌ی دوم اجازه نمی‌دهد چند واژه‌ی بسیار پرتکرار کل زبان را
-    // به خودشان تبدیل کنند، ولی فراوانی واقعی را هم دور نمی‌ریزد.
+    g_lexicon.loaded_path.clear();
+    if (!load_file(path, true)) return false;
+    std::string user = g_user_words_path;
+    std::ifstream probe(user);
+    if (!probe) {
+        size_t slash = path.find_last_of("/\\");
+        if (slash != std::string::npos) user = path.substr(0, slash + 1) + g_user_words_path;
+    }
+    load_file(user, false);
+
+    // فقط واژه‌های verified مدل املایی را می‌سازند. frequency وزن است، نه
+    // مدرک اعتبار؛ عضویت را واژه‌نامه‌ی curated تعیین می‌کند.
     std::vector<int> seq;
     for (const auto& kv : g_lexicon.freq) {
-        if (!word_symbols(kv.first, syms)) continue;
+        if (!g_lexicon.verified.count(kv.first) || !word_symbols(kv.first, syms)) continue;
+        g_lexicon.max_freq = std::max<u64>(g_lexicon.max_freq, kv.second);
         seq.clear(); seq.push_back(TEACH_BOUNDARY);
-        seq.insert(seq.end(), syms.begin(), syms.end());
-        seq.push_back(TEACH_BOUNDARY);
+        seq.insert(seq.end(), syms.begin(), syms.end()); seq.push_back(TEACH_BOUNDARY);
         u64 wt = std::max<u64>(1, (u64)std::sqrt((double)kv.second));
         for (size_t i = 1; i < seq.size(); ++i)
             g_lexicon.bigram[(size_t)seq[i-1] * TEACH_V + seq[i]] += wt;
         for (size_t i = 2; i < seq.size(); ++i)
             g_lexicon.trigram[((size_t)seq[i-2] * TEACH_V + seq[i-1]) * TEACH_V + seq[i]] += wt;
     }
-    g_lexicon.loaded = !g_lexicon.freq.empty();
-    g_lexicon.loaded_path = path;
-    g_lexicon.error = g_lexicon.loaded ? "" : "فایل داده خالی یا نامعتبر است";
+    g_lexicon.loaded = !g_lexicon.verified.empty();
+    g_lexicon.error = g_lexicon.loaded ? "" : "واژه‌ی تاییدشده‌ای در فایل داده نیست";
     return g_lexicon.loaded;
 }
 
@@ -1326,17 +1383,9 @@ static JudgeResult judge_word(const std::string& raw, int mode) {
     if (!word_symbols(w, a)) return R;
 
     auto it = g_lexicon.freq.find(w);
-    // تک‌حرف‌ها و دوبیتی‌های آلوده‌ی زیرنویس راه فرار بسیار ارزانی‌اند.
-    // فقط «و» یک‌حرفی است؛ واژه‌ی دوحرفی باید حداقل ۱۰۰ بار دیده شده باشد؛
-    // و عضویت قطعی عمومی حداقل فراوانی ۵ می‌خواهد. ردیف‌های کم‌اعتماد هنوز
-    // به n-gram کمک می‌کنند، اما پاداش دیکشنری نمی‌گیرند.
-    bool reliable_length = false;
-    if (it != g_lexicon.freq.end()) {
-        reliable_length = a.size() >= 3 ||
-                          (a.size() == 2 && it->second >= 100) ||
-                          (a.size() == 1 && w == "و");
-    }
-    R.exact = it != g_lexicon.freq.end() && it->second >= 5 && reliable_length;
+    // frequency دیگر رأی اعتبار نیست. فقط عضویت curated/verified حق پاداش
+    // دیکشنری می‌دهد؛ suggested بی‌اثر و blocked حتی از پایه حذف است.
+    R.exact = it != g_lexicon.freq.end() && g_lexicon.verified.count(w) != 0;
 
     std::vector<int> q; q.reserve(a.size()+2);
     q.push_back(TEACH_BOUNDARY); q.insert(q.end(), a.begin(), a.end()); q.push_back(TEACH_BOUNDARY);
@@ -1614,7 +1663,7 @@ static void device_score(u32 word_id, int score) {
 static bool save_brain(const char* path) {
     FILE* f = fopen(path, "wb");
     if (!f) return false;
-    const char magic[8] = {'S','M','I','L','E','0','0','4'};
+    const char magic[8] = {'S','M','I','L','E','0','0','5'};
     fwrite(magic, 1, 8, f);
     u32 nprog = (u32)g_progs.size(); fwrite(&nprog, 4, 1, f);
     for (auto& p : g_progs) {
@@ -1632,6 +1681,7 @@ static bool save_brain(const char* path) {
         fwrite(&nu.x, 4, 1, f); fwrite(&nu.y, 4, 1, f);
         fwrite(&nu.mana, 8, 1, f); fwrite(&nu.cap, 8, 1, f);
         fwrite(&nu.credit, 2, 1, f);
+        fwrite(&nu.plasticity, 2, 1, f);
         fwrite(&nu.last_fire, 8, 1, f); fwrite(&nu.last_input, 8, 1, f);
         fwrite(&nu.prog, 4, 1, f);
         fwrite(&nu.rng.s, 8, 1, f);
@@ -1653,14 +1703,17 @@ static bool load_brain(const char* path) {
     FILE* f = fopen(path, "rb");
     if (!f) return false;
     char magic[8];
-    const char current_magic[8] = {'S','M','I','L','E','0','0','4'};
+    const char current_magic[8] = {'S','M','I','L','E','0','0','5'};
+    const char v4_magic[8]      = {'S','M','I','L','E','0','0','4'};
     // Legacy checkpoint signature is kept as byte values so old trained brains
     // remain loadable without exposing the previous temporary codename.
     const unsigned char legacy_magic[8] = {0x53,0x41,0x52,0x49,0x4E,0x41,0x30,0x33};
     if (fread(magic,1,8,f) != 8 ||
-        (memcmp(magic,current_magic,8) && memcmp(magic,legacy_magic,8))) {
+        (memcmp(magic,current_magic,8) && memcmp(magic,v4_magic,8) &&
+         memcmp(magic,legacy_magic,8))) {
         fclose(f); return false;
     }
+    bool has_plasticity = memcmp(magic,current_magic,8) == 0;
     u32 nprog = 0; if (fread(&nprog,4,1,f)!=1) { fclose(f); return false; }
     g_progs.clear(); g_progs.resize(nprog);
     for (u32 i = 0; i < nprog; ++i) {
@@ -1680,6 +1733,7 @@ static bool load_brain(const char* path) {
         fread(&nu.x,4,1,f); fread(&nu.y,4,1,f);
         fread(&nu.mana,8,1,f); fread(&nu.cap,8,1,f);
         fread(&nu.credit,2,1,f);
+        if (has_plasticity) fread(&nu.plasticity,2,1,f); else nu.plasticity = 0;
         fread(&nu.last_fire,8,1,f); fread(&nu.last_input,8,1,f);
         fread(&nu.prog,4,1,f);
         fread(&nu.rng.s,8,1,f);
@@ -1730,8 +1784,12 @@ static void snapshot(double wall) {
             case S_DORMANT: s.dormant++;  break;
             case S_ASLEEP:  s.asleep++;   break;
         }
+        if (nu.plasticity > 0) s.plasticity_positive++;
+        else if (nu.plasticity < 0) s.plasticity_negative++;
+        s.plasticity_avg += nu.plasticity;
         s.total_mana += nu.mana;
     }
+    if (s.alive) s.plasticity_avg /= s.alive;
     for (int L = 0; L < N_LOBES; ++L) {
         s.pool[L] = B.lp[L].pool;
         s.ptgt[L] = std::max<i64>(1, B.lp[L].target);
@@ -1857,6 +1915,9 @@ static void neuron_eval_mt(u32 id, Worker& W, vtime now) {
 
     { i64 decay = (i64)nu.credit * dt / (5 * SEC);
       nu.credit = (u16)((i64)nu.credit > decay ? (i64)nu.credit - decay : 0); }
+    { i64 decay = std::llabs((i64)nu.plasticity) * dt / (3600 * SEC);
+      if (nu.plasticity > 0) nu.plasticity = (i16)std::max<i64>(0, (i64)nu.plasticity - decay);
+      else if (nu.plasticity < 0) nu.plasticity = (i16)std::min<i64>(0, (i64)nu.plasticity + decay); }
 
     bool shielded = (now < B.lp[nu.lobe].penalty_until + 5 * SEC);
     if (nu.mana <= 0) {
@@ -1897,6 +1958,12 @@ static void neuron_eval_mt(u32 id, Worker& W, vtime now) {
     if (nu.state == S_IGNORE) { emit(now + cadence, id, EV_EVAL, 0, 0); return; }
     if (nu.state == S_ASLEEP) { emit(now + cadence * 4, id, EV_EVAL, 0, 0); return; }
     if (nu.state == S_DORMANT) cadence *= 10;
+    // مسیر پاداش‌گرفته زودتر فرصت ارزیابی می‌گیرد؛ مسیر تنبیه‌شده کندتر.
+    if (nu.plasticity > 0)
+        cadence = std::max<vtime>(KIND_CADENCE[nu.kind] / 2,
+                  cadence * (16384 - nu.plasticity) / 16384);
+    else if (nu.plasticity < 0)
+        cadence = cadence * (8192 - nu.plasticity) / 8192;
 
     VmResult res = vm_run(nu, B);
     if (res.fault) { nu.faults++; W.faults++; nu.state = S_ASLEEP;
@@ -1908,7 +1975,15 @@ static void neuron_eval_mt(u32 id, Worker& W, vtime now) {
         int t = g_talkativeness.load(std::memory_order_relaxed);
         refr = REFRACTORY * 15 * 100 / std::max(10, t);
     }
+    if (nu.plasticity > 0) refr = std::max<vtime>(REFRACTORY / 2,
+                                      refr * (16384 - nu.plasticity) / 16384);
+    else if (nu.plasticity < 0) refr = refr * (8192 - nu.plasticity) / 8192;
     bool refractory = (nu.last_fire >= 0 && now - nu.last_fire < refr);
+    // plasticity منفی تلاش فایر را نیز با احتمال قطعیِ بذردار سرکوب می‌کند.
+    if (res.fired && nu.plasticity < 0) {
+        u32 keep = (u32)std::max(0, 8192 + (int)nu.plasticity);
+        if (nu.rng.below(8192) >= keep) res.fired = false;
+    }
 
     if (res.fired && res.mask && !refractory) {
         int nl = nu.lines();
@@ -2352,6 +2427,7 @@ select{background:#141d29;color:#dfe7f0;border:1px solid #2a3a52;border-radius:6
       <span>میانگین سیگنال <b id="waa">۰</b></span>
       <span>خط پایه <b id="wbase">۰</b></span>
       <span>خودکار +/−/۰ <b id="wpn">۰/۰/۰</b></span>
+      <span>پلاستیسیته <b id="pavg">۰</b> · نورون +/− <b id="ppn">۰/۰</b></span>
       <label class="auto"><input type="checkbox" id="autoscroll" checked> دنبال کردن</label>
     </div>
     <div class="teacherbar">
@@ -2361,18 +2437,18 @@ select{background:#141d29;color:#dfe7f0;border:1px solid #2a3a52;border-radius:6
           <option value="2">دیکشنری</option><option value="3" selected>ترکیبی</option>
         </select>
       </label>
-      <label>قدرت <input type="range" id="tstr" min="0" max="100" value="35"><b id="tstrv">۳۵٪</b></label>
+      <label>قدرت آزمایشی <input type="range" id="tstr" min="0" max="100" value="0"><b id="tstrv">۰٪</b></label>
       <span class="data" id="tdata">در حال بارگذاری فایل داده…</span>
     </div>
     <div class="teacher-types">
       <div class="teacher-type"><b>۱ · املایی</b><span>طبیعی‌بودن ترتیب حروف را با مدل دوحرفی/سه‌حرفی می‌سنجد؛ لازم نیست واژه دقیقاً در دیکشنری باشد.</span><small id="tstat1">هنوز استفاده نشده</small></div>
       <div class="teacher-type"><b>۲ · دیکشنری</b><span>عضویت دقیق و فراوانی واژه را می‌سنجد؛ واژه‌ی ناشناخته امتیاز دیکشنری صفر می‌گیرد.</span><small id="tstat2">هنوز استفاده نشده</small></div>
-      <div class="teacher-type"><b>۳ · ترکیبی</b><span>۵۵٪ امتیاز املایی + ۴۵٪ امتیاز دیکشنری؛ حالت پیش‌فرض و مناسب شروع آموزش.</span><small id="tstat3">هنوز استفاده نشده</small></div>
+      <div class="teacher-type"><b>۳ · ترکیبی</b><span>۵۵٪ امتیاز املایی + ۴۵٪ امتیاز دیکشنری؛ حالت پیش‌فرض برای مشاهده و ارزیابی.</span><small id="tstat3">هنوز استفاده نشده</small></div>
     </div>
 
     <div id="stream" class="stream"></div>
 
-    <div class="judge-note">ریز داوری — کیفیت نهایی با خط پایه مقایسه می‌شود؛ «سیگنال معلم» همان عدد واقعی اعمال‌شده به ردپای عصبی است (حداکثر ±۰٫۵).</div>
+    <div class="judge-note">ریز داوری — در قدرت ۰ فقط نمره‌ها اندازه‌گیری می‌شوند. قدرت بالاتر، plasticity آزمایشی را فعال می‌کند؛ آزمون A/B فعلی هنوز بهبود قابل اتکا نشان نداده است.</div>
     <div class="judge-wrap">
       <table class="judge-table"><thead><tr>
         <th>زمان</th><th>واژه</th><th>نوع معلم</th><th>املا</th><th>دیکشنری</th>
@@ -2505,12 +2581,14 @@ async function tick(){
   document.getElementById('waa').textContent=signed(s.aavg||0,3);
   document.getElementById('wbase').textContent=fnum(s.tbase||0,1);
   document.getElementById('wpn').textContent=fa(s.wpos||0)+' / '+fa(s.wneg||0)+' / '+fa(s.wzero||0);
+  document.getElementById('pavg').textContent=signed(s.pavg||0,1);
+  document.getElementById('ppn').textContent=fa(s.ppos||0)+' / '+fa(s.pneg||0);
   document.getElementById('teacher').value=String(s.teacher||0);
   document.getElementById('tstr').value=String(s.tstrength||0);
   document.getElementById('tstrv').textContent=fa(s.tstrength||0)+'٪';
   const td=document.getElementById('tdata');
   td.textContent=s.tloaded
-    ? fa(s.lexwords||0)+' واژه · پاداش خالص '+((s.areward||0)>=0?'+':'')+(s.areward||0).toFixed(2)
+    ? fa(s.lexwords||0)+' تایید · '+fa(s.lexsuggest||0)+' پیشنهاد · '+fa(s.lexblocked||0)+' مسدود · پاداش خالص '+signed(s.areward||0,2)
     : 'فایل persian_words.tsv پیدا نشد — معلم خاموش است';
   td.className='data '+(s.tloaded?'ok':'bad');
   const v=document.getElementById('verdict');
@@ -2682,15 +2760,20 @@ static std::string json_stats() {
              "\"wtotal\":%lld,\"wscored\":%lld,\"wavg\":%.3f,"
              "\"wauto\":%lld,\"wmanual\":%lld,\"wexact\":%lld,\"wquality\":%.2f,"
              "\"wpos\":%lld,\"wneg\":%lld,\"wzero\":%lld,"
+             "\"pavg\":%.2f,\"ppos\":%lld,\"pneg\":%lld,"
              "\"areward\":%.3f,\"aavg\":%.4f,\"tbase\":%.2f,"
-             "\"teacher\":%d,\"tstrength\":%d,\"tloaded\":%s,\"lexwords\":%zu,",
+             "\"teacher\":%d,\"tstrength\":%d,\"tloaded\":%s,"
+             "\"lexwords\":%zu,\"lexsuggest\":%zu,\"lexblocked\":%zu,",
              (long long)s.words_total, (long long)s.words_scored, s.avg_score,
              (long long)s.words_auto, (long long)s.words_manual, (long long)s.words_exact,
              s.avg_quality, (long long)s.words_positive, (long long)s.words_negative,
-             (long long)s.words_neutral, (double)s.auto_reward_total / MANA,
+             (long long)s.words_neutral, s.plasticity_avg,
+             (long long)s.plasticity_positive, (long long)s.plasticity_negative,
+             (double)s.auto_reward_total / MANA,
              s.words_auto ? (double)s.auto_reward_total / s.words_auto / MANA : 0.0,
              s.teacher_baseline, g_teacher_mode.load(), g_teacher_strength.load(),
-             g_lexicon.loaded ? "true" : "false", g_lexicon.freq.size());
+             g_lexicon.loaded ? "true" : "false", g_lexicon.verified.size(),
+             g_lexicon.suggested.size(), g_lexicon.blocked.size());
     j += buf;
 
     j += "\"tcount\":[";
@@ -2789,7 +2872,7 @@ static void http_server(int port) {
             g_talkativeness.store(std::max(10, std::min(400, qparam(R, "v", 100))));
             body = "{\"ok\":1}";
         } else if (R.rfind("GET /teacher-strength", 0) == 0) {
-            g_teacher_strength.store(std::max(0, std::min(100, qparam(R, "v", 35))));
+            g_teacher_strength.store(std::max(0, std::min(100, qparam(R, "v", 0))));
             body = "{\"ok\":1}";
         } else if (R.rfind("GET /teacher", 0) == 0) {
             int mode = std::max(0, std::min(3, qparam(R, "v", 0)));
@@ -2887,6 +2970,7 @@ int main(int argc, char** argv) {
         else if (a == "--threads")    g_threads.store(atoi(nxt()));
         else if (a == "--cpu")        g_cpu_percent.store(std::max(10, std::min(100, atoi(nxt()))));
         else if (a == "--words")      g_words_path = nxt();
+        else if (a == "--user-words") g_user_words_path = nxt();
         else if (a == "--teacher-strength")
             g_teacher_strength.store(std::max(0, std::min(100, atoi(nxt()))));
         else if (a == "--teacher") {
@@ -2914,9 +2998,10 @@ int main(int argc, char** argv) {
             teacher_ok = load_teacher_data(exe.substr(0, slash + 1) + g_words_path);
     }
     if (teacher_ok) {
-        printf("  معلم فارسی: %zu واژه از %s  (حالت %d · قدرت %d%%)\n",
-               g_lexicon.freq.size(), g_lexicon.loaded_path.c_str(),
+        printf("  معلم فارسی: %zu تاییدشده · %zu پیشنهادی · %zu مسدود  (حالت %d · قدرت %d%%)\n",
+               g_lexicon.verified.size(), g_lexicon.suggested.size(), g_lexicon.blocked.size(),
                g_teacher_mode.load(), g_teacher_strength.load());
+        printf("  داده: %s\n", g_lexicon.loaded_path.c_str());
     } else {
         printf("  [!] %s — معلم خودکار خاموش شد.\n", g_lexicon.error.c_str());
         g_teacher_mode.store(0);
@@ -2972,6 +3057,29 @@ int main(int argc, char** argv) {
         printf("\n  اثرانگشت: vt=%lld fires=%lld signals=%lld events=%lld faults=%lld\n",
                (long long)B.now, (long long)B.c_fires, (long long)B.c_signals,
                (long long)B.c_events, (long long)B.c_faults);
+        if (B.words_auto > 0) {
+            size_t k = std::min<size_t>(10, B.words.size());
+            double q_first = 0, q_last = 0;
+            for (size_t i = 0; i < k; ++i) {
+                q_first += B.words[i].quality;
+                q_last += B.words[B.words.size() - k + i].quality;
+            }
+            printf("  گزارش معلم: words=%lld exact=%lld (%.2f%%) avgQ=%.2f "
+                   "first%zuQ=%.2f last%zuQ=%.2f avgSignal=%+.4f\n",
+                   (long long)B.words_auto, (long long)B.words_exact,
+                   100.0 * B.words_exact / std::max<i64>(1, B.words_auto),
+                   B.quality_sum / std::max<i64>(1, B.words_auto),
+                   k, k ? q_first / k : 0.0, k, k ? q_last / k : 0.0,
+                   (double)B.auto_reward_total / std::max<i64>(1, B.words_auto) / MANA);
+            i64 psum = 0, ppos = 0, pneg = 0;
+            for (const auto& nu : B.n) {
+                psum += nu.plasticity;
+                if (nu.plasticity > 0) ppos++; else if (nu.plasticity < 0) pneg++;
+            }
+            printf("  پلاستیسیته: avg=%+.2f positive=%lld negative=%lld\n",
+                   (double)psum / std::max<size_t>(1, B.n.size()),
+                   (long long)ppos, (long long)pneg);
+        }
         save_brain("brain.dat");
         printf("\n  ذخیره شد: brain.dat\n");
         return 0;

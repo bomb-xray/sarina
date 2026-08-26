@@ -1,0 +1,10 @@
+# smile personal Persian words — UTF-8 TSV
+# columns: word<TAB>frequency<TAB>status<TAB>note
+# status verified  = trusted word; participates in dictionary and spelling teacher
+# status suggested = recorded for review; DOES NOT train the teacher yet
+# status blocked   = removes the word even if the base dictionary contains it
+#
+# Examples (remove the leading # to activate):
+# نورومورفیک	10	suggested	اصطلاح علمی؛ نیازمند بررسی
+# ایبوپروفین	10	verified	نام دارو
+# واژهغلط	0	blocked	غلط تایپی

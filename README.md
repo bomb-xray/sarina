@@ -6,9 +6,40 @@ Temporary anonymous compute prototype for a local CPU/CUDA validation run.
 
 - `smile.cpp` — complete CPU application: event engine, Persian teacher, dashboard and checkpoint
 - `smile_cuda.cu` — CUDA validation core for the real normal/memory neuron VM
-- `persian_words.tsv` — UTF-8 Persian teacher data
+- `persian_words.tsv` — curated UTF-8 Persian dictionary (readable TSV)
+- `my_words.tsv` — personal verified/suggested/blocked words; safe to edit
 - `run.ps1` — local Windows build/run script
 - `brain.dat` — generated checkpoint
+
+## Persian dictionary and personal suggestions
+
+The base file is human-readable and alphabetically sorted:
+
+```text
+word<TAB>frequency<TAB>status<TAB>source_or_note
+```
+
+Membership comes from 81,063 POS-tagged entries in the curated Lilak spell-check lexicon; its 12,624 untagged/user entries were excluded. Subtitle frequency is only a statistical weight. The previous raw 155k subtitle-type dump was removed.
+
+Put edits in `my_words.tsv`, not the generated base:
+
+```text
+نورومورفیک	10	suggested	نیازمند بازبینی
+ایبوپروفین	10	verified	نام دارو
+واژهغلط	0	blocked	غلط تایپی
+```
+
+- `verified`: trains dictionary and spelling judge
+- `suggested`: visible for review but gives no training signal
+- `blocked`: removes a base word
+
+The output codec now contains only the 32 Persian letters, `آ`, space, and four common punctuation marks. Arabic hamza forms, digits, and noisy symbols were removed.
+
+## Does the automatic teacher learn?
+
+The old implementation did not: A/B runs produced identical event fingerprints because reward only changed mana credit. Checkpoint-v5 adds persistent causal `plasticity` that changes firing cadence/refractory/gating, so feedback now changes behavior.
+
+It still did **not** win the clean-data A/B. Across three seeds (1000 neurons, 350 virtual seconds), automatic plasticity changed exact-word rate from 5.21% to 4.98% and average quality from 12.09 to 11.43; only the last-10-word quality rose slightly. Therefore automatic strength defaults to **0**: scoring and metrics remain active, but automatic behavioral modification is opt-in and experimental. This is an evaluator, not yet proven language training.
 
 ## CUDA test on Windows
 

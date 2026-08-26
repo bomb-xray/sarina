@@ -149,6 +149,9 @@ if (-not $Cpu -and $hasNvidia) {
 # Portable CPU fallback with the complete dashboard/teacher/checkpoint path.
 if (-not (Test-Path '.\smile.cpp')) { Fail 'smile.cpp is missing.'; exit 2 }
 if (-not (Test-Path '.\persian_words.tsv')) { Fail 'persian_words.tsv is missing.'; exit 2 }
+if (-not (Test-Path '.\my_words.tsv')) {
+    @('# personal words: word<TAB>frequency<TAB>status<TAB>note') | Set-Content '.\my_words.tsv' -Encoding UTF8
+}
 $gpp = Find-Tool 'g++' @('C:\msys64\ucrt64\bin\g++.exe','C:\msys64\mingw64\bin\g++.exe','C:\mingw64\bin\g++.exe')
 if (-not $gpp) { Fail 'g++ was not found. Install MSYS2/UCRT64 or run on the CUDA machine after installing its tools.'; exit 7 }
 $cpuExe = Join-Path $Dir 'smile.exe'
@@ -156,7 +159,7 @@ Remove-Item $cpuExe -Force -ErrorAction SilentlyContinue
 Info 'building portable CPU fallback...'
 & $gpp '-O2' '-std=c++17' '-pthread' '.\smile.cpp' '-o' $cpuExe '-lws2_32' '-static'
 if (-not (Test-Path $cpuExe)) { Fail 'CPU build failed.'; exit 8 }
-$args = '--neurons 32000 --port 8420 --words persian_words.tsv'
+$args = '--neurons 32000 --port 8420 --words persian_words.tsv --user-words my_words.tsv'
 if (Test-Path '.\brain.dat') { $args += ' --load brain.dat'; Good 'continuing brain.dat' }
 Start-Process $cpuExe -ArgumentList $args -WorkingDirectory $Dir
 Start-Sleep 2
