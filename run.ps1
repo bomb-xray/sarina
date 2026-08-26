@@ -63,7 +63,7 @@ $nvcc = Find-Tool 'nvcc' $cudaCandidates
 
 function Import-VsEnvironment {
     if (Get-Command cl.exe -ErrorAction SilentlyContinue) { return $true }
-    $vswhere = "$env:ProgramFiles(x86)\Microsoft Visual Studio\Installer\vswhere.exe"
+    $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
     if (-not (Test-Path $vswhere)) { return $false }
     $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
     if (-not $vs) { return $false }
@@ -80,11 +80,11 @@ $gpuName = ''
 $compute = ''
 if ($nvsmi) {
     try {
-        $gpuName = (& $nvsmi --query-gpu=name --format=csv,noheader,nounits | Select-Object -First 1).Trim()
-        $compute = (& $nvsmi --query-gpu=compute_cap --format=csv,noheader,nounits | Select-Object -First 1).Trim()
+        $gpuName = (& $nvsmi '--query-gpu=name' '--format=csv,noheader,nounits' | Select-Object -First 1).Trim()
+        $compute = (& $nvsmi '--query-gpu=compute_cap' '--format=csv,noheader,nounits' | Select-Object -First 1).Trim()
         $hasNvidia = [bool]$gpuName
     } catch {
-        try { $gpuName = (& $nvsmi --query-gpu=name --format=csv,noheader | Select-Object -First 1).Trim(); $hasNvidia=[bool]$gpuName } catch { }
+        try { $gpuName = (& $nvsmi '--query-gpu=name' '--format=csv,noheader' | Select-Object -First 1).Trim(); $hasNvidia=[bool]$gpuName } catch { }
     }
 }
 
@@ -130,7 +130,7 @@ if (-not $Cpu -and $hasNvidia) {
     Remove-Item $gpuExe -Force -ErrorAction SilentlyContinue
     $log = Join-Path $env:TEMP 'smile_cuda_build.txt'
     Info "building CUDA core ($arch)..."
-    & $nvcc -O3 -std=c++17 "-arch=$arch" .\smile_cuda.cu -o $gpuExe 2>&1 |
+    & $nvcc '-O3' '-std=c++17' "-arch=$arch" '.\smile_cuda.cu' '-o' $gpuExe 2>&1 |
         Tee-Object -FilePath $log | Out-Null
     if (-not (Test-Path $gpuExe)) {
         Fail 'CUDA build failed:'
@@ -154,7 +154,7 @@ if (-not $gpp) { Fail 'g++ was not found. Install MSYS2/UCRT64 or run on the CUD
 $cpuExe = Join-Path $Dir 'smile.exe'
 Remove-Item $cpuExe -Force -ErrorAction SilentlyContinue
 Info 'building portable CPU fallback...'
-& $gpp -O2 -std=c++17 -pthread .\smile.cpp -o $cpuExe -lws2_32 -static
+& $gpp '-O2' '-std=c++17' '-pthread' '.\smile.cpp' '-o' $cpuExe '-lws2_32' '-static'
 if (-not (Test-Path $cpuExe)) { Fail 'CPU build failed.'; exit 8 }
 $args = '--neurons 32000 --port 8420 --words persian_words.tsv'
 if (Test-Path '.\brain.dat') { $args += ' --load brain.dat'; Good 'continuing brain.dat' }
