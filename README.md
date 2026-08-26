@@ -10,7 +10,29 @@
 
 کد همچنان تک‌فایل است؛ واژه‌نامه عمداً از کد جدا نگه داشته شده تا بدون کامپایل مجدد قابل تعویض باشد.
 
-## اجرا روی ویندوز
+## دانلود کامل پروژه روی لپ‌تاپ ویندوزی
+
+[دانلود ZIP کامل همین شاخه](https://github.com/bomb-xray/sarina/archive/refs/heads/arena/01a00c33-sarina.zip)
+
+1. فایل ZIP را Extract کنید.
+2. داخل پوشه‌ی استخراج‌شده PowerShell باز کنید.
+3. اجرا کنید:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\run.ps1
+```
+
+اسکریپت تشخیص می‌دهد که از فایل محلی اجرا شده و **همان `sarina.cpp` و `persian_words.tsv` داخل پوشه** را کامپایل می‌کند؛ چیزی را در پوشه‌ی دیگری دانلود نمی‌کند. `sarina.exe` و `brain.dat` نیز همان‌جا ساخته می‌شوند و کل پروژه دست خودتان می‌ماند. اگر قبلاً نسخه‌ی آنلاین را اجرا کرده باشید، در اولین اجرا چک‌پوینت `%USERPROFILE%\sarina\brain.dat` نیز خودکار به پوشه‌ی جدید منتقل می‌شود.
+
+اگر Git نصب است، روش جایگزین:
+
+```powershell
+git clone --branch arena/01a00c33-sarina --single-branch https://github.com/bomb-xray/sarina.git
+cd sarina
+powershell -ExecutionPolicy Bypass -File .\run.ps1
+```
+
+## نصب/به‌روزرسانی آنلاین روی ویندوز
 
 در PowerShell:
 
@@ -18,7 +40,7 @@
 irm https://raw.githubusercontent.com/bomb-xray/sarina/arena/01a00c33-sarina/run.ps1 | iex
 ```
 
-اسکریپت هم `sarina.cpp` و هم `persian_words.tsv` را می‌گیرد، نمونه‌ی در حال اجرا را ابتدا امن در `brain.dat` ذخیره می‌کند، برنامه را می‌سازد و اگر چک‌پوینت موجود باشد همان مغز را ادامه می‌دهد. داشبورد روی <http://localhost:8420> باز می‌شود. به URL پارامتر تصادفی `?v=...` اضافه نکنید؛ GitHub Raw ممکن است پاسخ 403 بدهد.
+در حالت آنلاین اسکریپت `sarina.cpp` و `persian_words.tsv` را در `%USERPROFILE%\sarina` نگه می‌دارد. در هر دو حالت، نمونه‌ی در حال اجرا ابتدا امن در `brain.dat` ذخیره می‌شود و اگر چک‌پوینت موجود باشد همان مغز ادامه می‌یابد. داشبورد روی <http://localhost:8420> باز می‌شود. به URL پارامتر تصادفی `?v=...` اضافه نکنید؛ GitHub Raw ممکن است پاسخ 403 بدهد.
 
 ## ساخت دستی
 

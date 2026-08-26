@@ -1,7 +1,11 @@
 # ============================================================================
 #  سارینا — نصب و اجرای خودکار (ویندوز / PowerShell)
 #
+#  آنلاین:
 #  irm https://raw.githubusercontent.com/bomb-xray/sarina/arena/01a00c33-sarina/run.ps1 | iex
+#
+#  از پوشه‌ی دانلودشده:
+#  powershell -ExecutionPolicy Bypass -File .\run.ps1
 #
 #  نیازی به دسترسی ادمین ندارد. اگر کامپایلر نبود، یک نسخه‌ی قابل حمل
 #  (w64devkit، حدود ۹۰ مگابایت) را در پوشه‌ی خود پروژه می‌گیرد.
@@ -17,11 +21,20 @@ try {
     chcp 65001 > $null
 } catch { }
 
-$ScriptVersion = '2.6'
+$ScriptVersion = '2.7'
 $Branch  = 'arena/01a00c33-sarina'
 $RawBase = "https://raw.githubusercontent.com/bomb-xray/sarina/$Branch"
 $ApiBase = "https://api.github.com/repos/bomb-xray/sarina/contents"
-$Dir     = Join-Path $env:USERPROFILE 'sarina'
+
+# اگر اسکریپت از یک فایل واقعی اجرا شده و کد/داده کنارش هستند، همان پوشه
+# پروژه است. حالت irm|iex مسیر فایل ندارد و همچنان در %USERPROFILE%\sarina نصب می‌شود.
+$LocalMode = $false
+$Dir = Join-Path $env:USERPROFILE 'sarina'
+if ($PSScriptRoot -and (Test-Path (Join-Path $PSScriptRoot 'sarina.cpp')) -and (Test-Path (Join-Path $PSScriptRoot 'persian_words.tsv'))) {
+    $LocalMode = $true
+    $Dir = $PSScriptRoot
+}
+
 $Port    = 8420
 $Neurons = 32000
 
@@ -42,28 +55,40 @@ New-Item -ItemType Directory -Force -Path $Dir | Out-Null
 Set-Location $Dir
 Ok $Dir
 
-# --- ۲. دریافت کد + داده ---------------------------------------------------
-Step 2 'دریافت کد و واژه‌نامه‌ی فارسی (~۲.۶ مگابایت)'
-try {
-    # از API گیت‌هاب می‌گیریم: کش نمی‌شود و ۴۰۳ نمی‌دهد
-    # (raw.githubusercontent با پارامتر دلخواه ۴۰۳ برمی‌گرداند)
-    $hdr = @{ Accept = 'application/vnd.github.raw'; 'User-Agent' = 'sarina-installer' }
+# --- ۲. کد + داده ---------------------------------------------------------
+if ($LocalMode) {
+    Step 2 'استفاده از فایل‌های همین پوشه (حالت محلی)'
     foreach ($name in @('sarina.cpp', 'persian_words.tsv')) {
-        try {
-            Invoke-WebRequest -Uri "$ApiBase/$name`?ref=$Branch" -Headers $hdr `
-                              -OutFile $name -UseBasicParsing -TimeoutSec 120
-        } catch {
-            # اگر API در دسترس نبود، مسیر معمولی بدون پارامتر
-            Invoke-WebRequest -Uri "$RawBase/$name" -OutFile $name `
-                              -Headers @{ 'Cache-Control' = 'no-cache' } -UseBasicParsing -TimeoutSec 120
+        $item = Get-Item (Join-Path $Dir $name) -ErrorAction SilentlyContinue
+        if (-not $item -or $item.Length -eq 0) {
+            Fail "فایل محلی ناقص است: $name"
+            return
         }
-        $kb = [math]::Round((Get-Item $name).Length / 1KB, 1)
-        Ok "$name دریافت شد ($kb KB)"
+        Ok ("{0} ({1} KB)" -f $name, [math]::Round($item.Length / 1KB, 1))
     }
-} catch {
-    Fail "دانلود ناموفق: $($_.Exception.Message)"
-    Write-Host '  اتصال اینترنت یا دسترسی به گیت‌هاب را بررسی کنید.' -ForegroundColor Red
-    return
+} else {
+    Step 2 'دریافت کد و واژه‌نامه‌ی فارسی (~۲.۶ مگابایت)'
+    try {
+        # از API گیت‌هاب می‌گیریم: کش نمی‌شود و ۴۰۳ نمی‌دهد
+        # (raw.githubusercontent با پارامتر دلخواه ۴۰۳ برمی‌گرداند)
+        $hdr = @{ Accept = 'application/vnd.github.raw'; 'User-Agent' = 'sarina-installer' }
+        foreach ($name in @('sarina.cpp', 'persian_words.tsv')) {
+            try {
+                Invoke-WebRequest -Uri "$ApiBase/$name`?ref=$Branch" -Headers $hdr `
+                                  -OutFile $name -UseBasicParsing -TimeoutSec 120
+            } catch {
+                # اگر API در دسترس نبود، مسیر معمولی بدون پارامتر
+                Invoke-WebRequest -Uri "$RawBase/$name" -OutFile $name `
+                                  -Headers @{ 'Cache-Control' = 'no-cache' } -UseBasicParsing -TimeoutSec 120
+            }
+            $kb = [math]::Round((Get-Item $name).Length / 1KB, 1)
+            Ok "$name دریافت شد ($kb KB)"
+        }
+    } catch {
+        Fail "دانلود ناموفق: $($_.Exception.Message)"
+        Write-Host '  اتصال اینترنت یا دسترسی به گیت‌هاب را بررسی کنید.' -ForegroundColor Red
+        return
+    }
 }
 
 # --- ۳. یافتن کامپایلر -----------------------------------------------------
@@ -203,10 +228,19 @@ Step 5 "اجرا روی پورت $Port"
 Get-Process sarina -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 Start-Sleep -Milliseconds 400
 
+# کاربری که قبلاً نسخه‌ی آنلاین را اجرا کرده، مغز آموزش‌دیده‌اش را در
+# %USERPROFILE%\sarina دارد. در اولین اجرای ZIP محلی آن را خودکار منتقل کن.
+$checkpoint = Join-Path $Dir 'brain.dat'
+$legacyCheckpoint = Join-Path (Join-Path $env:USERPROFILE 'sarina') 'brain.dat'
+if ($LocalMode -and -not (Test-Path $checkpoint) -and (Test-Path $legacyCheckpoint)) {
+    Copy-Item $legacyCheckpoint $checkpoint -Force
+    Ok 'brain.dat قبلی به پوشه‌ی محلی منتقل شد'
+}
+
 # در پنجره‌ی جداگانه اجرا می‌شود تا بسته شدن این پاورشل مغز را نکشد.
 # اگر چک‌پوینت داریم همان مغز ادامه می‌دهد؛ داده‌ی آموزش داخل کد نیست.
 $runArgs = "--neurons $Neurons --port $Port --words persian_words.tsv"
-if (Test-Path (Join-Path $Dir 'brain.dat')) {
+if (Test-Path $checkpoint) {
     $runArgs += ' --load brain.dat'
     Ok 'ادامه از brain.dat'
 } else {
