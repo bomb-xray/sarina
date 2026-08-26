@@ -17,7 +17,7 @@ try {
     chcp 65001 > $null
 } catch { }
 
-$ScriptVersion = '2.5'
+$ScriptVersion = '2.6'
 $Branch  = 'arena/01a00c33-sarina'
 $RawBase = "https://raw.githubusercontent.com/bomb-xray/sarina/$Branch"
 $ApiBase = "https://api.github.com/repos/bomb-xray/sarina/contents"
@@ -151,9 +151,19 @@ if ($gpp) {
 Step 4 'کامپایل (۱۰ تا ۳۰ ثانیه)'
 $exe = Join-Path $Dir 'sarina.exe'
 
-# نمونه‌ی در حال اجرا را ببند، وگرنه فایل exe قفل است و کامپایل جدید
-# بی‌صدا شکست می‌خورد — و کاربر همان نسخه‌ی قدیمی را می‌بیند.
-Get-Process sarina -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+# نمونه‌ی در حال اجرا را اول از مسیر خودش ذخیره کن، بعد ببند؛ وگرنه هم exe
+# قفل می‌ماند و هم یادگیریِ بعد از آخرین ذخیره از بین می‌رود.
+$old = Get-Process sarina -ErrorAction SilentlyContinue
+if ($old) {
+    try {
+        Invoke-WebRequest -Uri "http://localhost:$Port/shutdown" -UseBasicParsing -TimeoutSec 5 | Out-Null
+        Start-Sleep -Milliseconds 700
+        Ok 'مغز در brain.dat ذخیره شد'
+    } catch {
+        Warn 'نمونه‌ی قبلی پاسخ نداد؛ فقط فرایند بسته می‌شود (آخرین ذخیره محفوظ است).'
+    }
+    $old | Stop-Process -Force -ErrorAction SilentlyContinue
+}
 Start-Sleep -Milliseconds 600
 
 if (Test-Path $exe) {
@@ -194,9 +204,16 @@ Get-Process sarina -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAct
 Start-Sleep -Milliseconds 400
 
 # در پنجره‌ی جداگانه اجرا می‌شود تا بسته شدن این پاورشل مغز را نکشد.
-# خود برنامه مرورگر را باز می‌کند.
+# اگر چک‌پوینت داریم همان مغز ادامه می‌دهد؛ داده‌ی آموزش داخل کد نیست.
+$runArgs = "--neurons $Neurons --port $Port --words persian_words.tsv"
+if (Test-Path (Join-Path $Dir 'brain.dat')) {
+    $runArgs += ' --load brain.dat'
+    Ok 'ادامه از brain.dat'
+} else {
+    Ok 'مغز تازه (چک‌پوینتی پیدا نشد)'
+}
 $proc = Start-Process -FilePath $exe `
-        -ArgumentList "--neurons $Neurons --port $Port --words persian_words.tsv" `
+        -ArgumentList $runArgs `
         -PassThru -WorkingDirectory $Dir
 
 $url   = "http://localhost:$Port"

@@ -18,7 +18,7 @@
 irm https://raw.githubusercontent.com/bomb-xray/sarina/arena/01a00c33-sarina/run.ps1 | iex
 ```
 
-اسکریپت هم `sarina.cpp` و هم `persian_words.tsv` را می‌گیرد، برنامه را می‌سازد و داشبورد را روی <http://localhost:8420> باز می‌کند. به URL پارامتر تصادفی `?v=...` اضافه نکنید؛ GitHub Raw ممکن است پاسخ 403 بدهد.
+اسکریپت هم `sarina.cpp` و هم `persian_words.tsv` را می‌گیرد، نمونه‌ی در حال اجرا را ابتدا امن در `brain.dat` ذخیره می‌کند، برنامه را می‌سازد و اگر چک‌پوینت موجود باشد همان مغز را ادامه می‌دهد. داشبورد روی <http://localhost:8420> باز می‌شود. به URL پارامتر تصادفی `?v=...` اضافه نکنید؛ GitHub Raw ممکن است پاسخ 403 بدهد.
 
 ## ساخت دستی
 
