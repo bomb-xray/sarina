@@ -318,7 +318,12 @@ struct OutWord {
     i64         score_milli = 0;   // نمره‌ی نمایشی × ۱۰۰۰
     i64         auto_reward = 0;   // سیگنال خودکار اعمال‌شده
     i64         manual_reward = 0; // سیگنال دستی اعمال‌شده
-    int         quality = 0;       // کیفیت واژگانی ۰..۱۰۰
+    int         quality = 0;       // کیفیت نهایی ۰..۱۰۰
+    int         spelling_quality = 0;
+    int         dictionary_quality = 0;
+    double      teacher_baseline = 0;
+    double      teacher_advantage = 0;
+    u8          teacher_mode = 0;  // ۱ املایی · ۲ دیکشنری · ۳ ترکیبی
     bool        exact = false;     // عضو دقیق واژه‌نامه
     bool        scored = false;
     bool        auto_scored = false;
@@ -353,8 +358,13 @@ struct Stats {
     std::vector<ChatMsg> chat;
     i64 words_total = 0, words_scored = 0;
     i64 words_auto = 0, words_manual = 0, words_exact = 0;
-    double avg_score = 0, avg_quality = 0;
+    i64 words_positive = 0, words_negative = 0, words_neutral = 0;
+    double avg_score = 0, avg_quality = 0, teacher_baseline = 0;
+    double teacher_baseline_by_mode[4] = {0,0,0,0};
     i64 auto_reward_total = 0;
+    i64 teacher_count[4] = {0,0,0,0};
+    double teacher_quality_avg[4] = {0,0,0,0};
+    double teacher_reward_avg[4] = {0,0,0,0};
 };
 
 struct Brain {
@@ -396,10 +406,16 @@ struct Brain {
     i64                  words_auto   = 0;
     i64                  words_manual = 0;
     i64                  words_exact  = 0;
+    i64                  words_positive = 0;
+    i64                  words_negative = 0;
+    i64                  words_neutral  = 0;
     i64                  auto_reward_total = 0;
+    i64                  teacher_count[4] = {0,0,0,0};
+    i64                  teacher_quality_sum[4] = {0,0,0,0};
+    i64                  teacher_reward_sum[4] = {0,0,0,0};
     double               score_sum    = 0;
     double               quality_sum  = 0;
-    double               teacher_baseline = 45.0;
+    double               teacher_baseline[4] = {0.0,45.0,45.0,45.0};
     std::vector<u32>     cur_trace;       // ردپای واژه‌ی در حال ساخت
 
     // --- دستگاه: بخش حواس (ورودی انسان → مغز) ---
@@ -1279,9 +1295,15 @@ static bool load_teacher_data(const std::string& path) {
     return g_lexicon.loaded;
 }
 
-struct JudgeResult { int quality = 0; bool exact = false; std::string normalized; };
+struct JudgeResult {
+    int quality = 0;
+    int spelling = 0;
+    int dictionary = 0;
+    bool exact = false;
+    std::string normalized;
+};
 
-static JudgeResult judge_word(const std::string& raw) {
+static JudgeResult judge_word(const std::string& raw, int mode) {
     JudgeResult R;
     if (!g_lexicon.loaded) return R;
     std::string w = normalize_word(raw);
@@ -1347,7 +1369,8 @@ static JudgeResult judge_word(const std::string& raw) {
         lexical = (int)std::llround(50.0 + 50.0 * fscore);
     }
 
-    int mode = g_teacher_mode.load(std::memory_order_relaxed);
+    R.spelling = spelling;
+    R.dictionary = lexical;
     if      (mode == 1) R.quality = spelling;
     else if (mode == 2) R.quality = lexical;
     else                R.quality = (int)std::llround(0.55 * spelling + 0.45 * lexical);
@@ -1420,8 +1443,11 @@ static void device_close_word() {
 
     int mode = g_teacher_mode.load(std::memory_order_relaxed);
     if (mode > 0 && g_lexicon.loaded) {
-        JudgeResult J = judge_word(B.cur_word);
+        JudgeResult J = judge_word(B.cur_word, mode);
         w.quality = J.quality;
+        w.spelling_quality = J.spelling;
+        w.dictionary_quality = J.dictionary;
+        w.teacher_mode = (u8)mode;
         w.exact = J.exact;
         B.quality_sum += J.quality;
         if (J.exact) B.words_exact++;
@@ -1429,13 +1455,15 @@ static void device_close_word() {
         // مزیت نسبت به خط پایه‌ی متحرک: حتی پیش از ساخت اولین واژه‌ی کامل،
         // الگوهای «کمتر بد» پاداش می‌گیرند. میانگین‌گیری جلوی تورم مانا را می‌گیرد.
         double advantage = 0.0;
-        if (B.words_auto == 0) {
-            // اولین نمونه فقط خط پایه را می‌سازد؛ شروع با ۴۵ باعث می‌شد ده‌ها
-            // واژه‌ی تصادفی پشت‌سرهم منفی شوند و دهان پیش از یادگیری ساکت شود.
-            B.teacher_baseline = J.quality;
+        double baseline_before = B.teacher_baseline[mode];
+        if (B.teacher_count[mode] == 0) {
+            // اولین نمونه‌ی هر نوع معلم فقط خط پایه‌ی خودش را می‌سازد؛ مقیاس
+            // دیکشنری با املایی فرق دارد و نباید baseline همدیگر را آلوده کنند.
+            baseline_before = J.quality;
+            B.teacher_baseline[mode] = J.quality;
         } else {
-            advantage = J.quality - B.teacher_baseline;
-            B.teacher_baseline = 0.92 * B.teacher_baseline + 0.08 * J.quality;
+            advantage = J.quality - baseline_before;
+            B.teacher_baseline[mode] = 0.92 * baseline_before + 0.08 * J.quality;
         }
         if (J.exact && J.quality >= 40) advantage = std::max(5.0, advantage);
         advantage = std::max(-40.0, std::min(40.0, advantage));
@@ -1443,12 +1471,20 @@ static void device_close_word() {
         i64 reward = (i64)std::llround(advantage * strength / 8.0);
         reward = std::max<i64>(-500, std::min<i64>(500, reward));
 
+        w.teacher_baseline = baseline_before;
+        w.teacher_advantage = advantage;
         w.auto_reward = reward;
         w.score_milli = reward;
         w.auto_scored = w.scored = true;
         B.words_auto++; B.words_scored++;
         B.score_sum += (double)reward / MANA;
         B.auto_reward_total += reward;
+        B.teacher_count[mode]++;
+        B.teacher_quality_sum[mode] += J.quality;
+        B.teacher_reward_sum[mode] += reward;
+        if (reward > 0) B.words_positive++;
+        else if (reward < 0) B.words_negative++;
+        else B.words_neutral++;
         // فشار اصلی خودکار روی اعتبار همان مسیر است. فقط یک‌هشتم به استخر
         // کل لوب می‌رود تا موج اولیه‌ی خطا، راه‌حل «برای همیشه ساکت شو» نسازد.
         g_reward_pending.fetch_add(reward / 8);
@@ -1714,9 +1750,22 @@ static void snapshot(double wall) {
     s.words_auto   = B.words_auto;
     s.words_manual = B.words_manual;
     s.words_exact  = B.words_exact;
+    s.words_positive = B.words_positive;
+    s.words_negative = B.words_negative;
+    s.words_neutral  = B.words_neutral;
     s.auto_reward_total = B.auto_reward_total;
     s.avg_score    = B.words_scored ? B.score_sum / B.words_scored : 0.0;
     s.avg_quality  = B.words_auto ? B.quality_sum / B.words_auto : 0.0;
+    int current_teacher = std::max(0, std::min(3, g_teacher_mode.load()));
+    s.teacher_baseline = current_teacher ? B.teacher_baseline[current_teacher] : 0.0;
+    for (int m = 1; m <= 3; ++m) {
+        s.teacher_baseline_by_mode[m] = B.teacher_baseline[m];
+        s.teacher_count[m] = B.teacher_count[m];
+        s.teacher_quality_avg[m] = B.teacher_count[m]
+            ? (double)B.teacher_quality_sum[m] / B.teacher_count[m] : 0.0;
+        s.teacher_reward_avg[m] = B.teacher_count[m]
+            ? (double)B.teacher_reward_sum[m] / B.teacher_count[m] / MANA : 0.0;
+    }
 
     s.hist_fire  = g_stats.hist_fire;
     s.hist_pool  = g_stats.hist_pool;
@@ -2185,6 +2234,19 @@ input[type=range]{width:130px;vertical-align:middle}
             border:1px solid #1b2534;border-radius:8px;padding:8px 11px;margin-bottom:10px;font-size:11px}
 .teacherbar label{color:#75879e}.teacherbar b{color:#dfe7f0}.teacherbar .data{margin-right:auto;color:#65788f}
 .teacherbar .data.ok{color:#3ddc84}.teacherbar .data.bad{color:#ff6b6b}
+.teacher-types{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:10px}
+.teacher-type{background:#0c1119;border:1px solid #1b2534;border-radius:8px;padding:9px 11px}
+.teacher-type b{display:block;color:#9fc5f8;font-size:12px}.teacher-type span{display:block;color:#71849a;font-size:10px;line-height:1.6}
+.teacher-type small{display:block;color:#dfe7f0;margin-top:5px;font-size:10px}
+@media(max-width:800px){.teacher-types{grid-template-columns:1fr}}
+.judge-note{font-size:11px;color:#71849a;margin:12px 0 6px}
+.judge-wrap{overflow:auto;border:1px solid #1b2534;border-radius:8px;background:#080b10;max-height:360px}
+.judge-table{width:100%;border-collapse:collapse;min-width:1050px;font-size:11px;font-variant-numeric:tabular-nums}
+.judge-table th{position:sticky;top:0;background:#141d29;color:#8fa6c2;padding:7px 8px;border-bottom:1px solid #263448;white-space:nowrap;z-index:1}
+.judge-table td{padding:6px 8px;border-bottom:1px solid #121b28;text-align:center;white-space:nowrap}
+.judge-table tr:hover td{background:#101927}.judge-table .wordcell{font:13px monospace;color:#dfe7f0;direction:rtl}
+.judge-table .pos{color:#3ddc84;font-weight:700}.judge-table .neg{color:#ff6b6b;font-weight:700}
+.judge-table .zero{color:#75879e}.judge-table .exactyes{color:#4da3ff}.judge-table .manualscore{color:#c792ea}
 select{background:#141d29;color:#dfe7f0;border:1px solid #2a3a52;border-radius:6px;
        padding:5px 8px;font-family:inherit}
 .stream{background:#080b10;border:1px solid #1b2534;border-radius:8px;padding:12px;
@@ -2275,12 +2337,14 @@ select{background:#141d29;color:#dfe7f0;border:1px solid #2a3a52;border-radius:6
   <div class="panel chatpanel">
     <h3>گفتگو و نمره‌دهی</h3>
     <div class="chatstats">
-      <span>کلمات تولیدشده <b id="wt">۰</b></span>
+      <span>کلمات <b id="wt">۰</b></span>
       <span>داوری خودکار <b id="wat">۰</b></span>
       <span>دستی <b id="wmt">۰</b></span>
-      <span>عضو واژه‌نامه <b id="wex">۰</b></span>
-      <span>میانگین کیفیت <b id="wq">۰</b></span>
-      <span>میانگین نمره <b id="wa">۰</b></span>
+      <span>عضو واژه‌نامه <b id="wex">۰</b> (<b id="wexr">۰٪</b>)</span>
+      <span>میانگین کیفیت <b id="wq">۰</b>/۱۰۰</span>
+      <span>میانگین سیگنال <b id="waa">۰</b></span>
+      <span>خط پایه <b id="wbase">۰</b></span>
+      <span>خودکار +/−/۰ <b id="wpn">۰/۰/۰</b></span>
       <label class="auto"><input type="checkbox" id="autoscroll" checked> دنبال کردن</label>
     </div>
     <div class="teacherbar">
@@ -2293,8 +2357,22 @@ select{background:#141d29;color:#dfe7f0;border:1px solid #2a3a52;border-radius:6
       <label>قدرت <input type="range" id="tstr" min="0" max="100" value="35"><b id="tstrv">۳۵٪</b></label>
       <span class="data" id="tdata">در حال بارگذاری فایل داده…</span>
     </div>
+    <div class="teacher-types">
+      <div class="teacher-type"><b>۱ · املایی</b><span>طبیعی‌بودن ترتیب حروف را با مدل دوحرفی/سه‌حرفی می‌سنجد؛ لازم نیست واژه دقیقاً در دیکشنری باشد.</span><small id="tstat1">هنوز استفاده نشده</small></div>
+      <div class="teacher-type"><b>۲ · دیکشنری</b><span>عضویت دقیق و فراوانی واژه را می‌سنجد؛ واژه‌ی ناشناخته امتیاز دیکشنری صفر می‌گیرد.</span><small id="tstat2">هنوز استفاده نشده</small></div>
+      <div class="teacher-type"><b>۳ · ترکیبی</b><span>۵۵٪ امتیاز املایی + ۴۵٪ امتیاز دیکشنری؛ حالت پیش‌فرض و مناسب شروع آموزش.</span><small id="tstat3">هنوز استفاده نشده</small></div>
+    </div>
 
     <div id="stream" class="stream"></div>
+
+    <div class="judge-note">ریز داوری — کیفیت نهایی با خط پایه مقایسه می‌شود؛ «سیگنال معلم» همان عدد واقعی اعمال‌شده به ردپای عصبی است (حداکثر ±۰٫۵).</div>
+    <div class="judge-wrap">
+      <table class="judge-table"><thead><tr>
+        <th>زمان</th><th>واژه</th><th>نوع معلم</th><th>املا</th><th>دیکشنری</th>
+        <th>کیفیت نهایی</th><th>خط پایه</th><th>مزیت</th><th>سیگنال معلم</th>
+        <th>نمره دستی</th><th>عضو؟</th><th>ردپا</th>
+      </tr></thead><tbody id="judgeRows"><tr><td colspan="12" class="zero">هنوز واژه‌ای داوری نشده…</td></tr></tbody></table>
+    </div>
 
     <div class="composer">
       <input id="msg" type="text" placeholder="چیزی به مدل بگو…" autocomplete="off">
@@ -2328,7 +2406,10 @@ select{background:#141d29;color:#dfe7f0;border:1px solid #2a3a52;border-radius:6
 </div>
 <script>
 const LOBE=['لوب ورودی','لوب مرکزی','لوب پایانی'];
-const fa=n=>n.toLocaleString('fa-IR');
+const TMODE=['خاموش','املایی','دیکشنری','ترکیبی'];
+const fa=n=>(Number(n)||0).toLocaleString('fa-IR');
+const fnum=(n,d=2)=>(Number(n)||0).toLocaleString('fa-IR',{minimumFractionDigits:d,maximumFractionDigits:d});
+const signed=(n,d=3)=>{n=Number(n)||0;return (n>0?'+':'')+fnum(n,d);};
 function spark(id,data,color,lo,hi){
   const c=document.getElementById(id),d=c.getContext('2d'),W=c.width=c.clientWidth*2,H=c.height=220;
   d.clearRect(0,0,W,H); if(!data||data.length<2)return;
@@ -2342,6 +2423,35 @@ function spark(id,data,color,lo,hi){
   d.stroke();
   d.fillStyle='#5d7086';d.font='22px sans-serif';d.textAlign='right';
   d.fillText(mx.toFixed(2),W-6,26); d.fillText(mn.toFixed(2),W-6,H-8);
+}
+function renderTeacherStats(s){
+  for(let m=1;m<=3;m++){
+    const c=(s.tcount&&s.tcount[m])||0;
+    document.getElementById('tstat'+m).textContent=c
+      ? fa(c)+' واژه · میانگین کیفیت '+fnum((s.tqavg&&s.tqavg[m])||0,1)+
+        ' · میانگین سیگنال '+signed((s.travg&&s.travg[m])||0,3)+
+        ' · خط پایه '+fnum((s.tbases&&s.tbases[m])||0,1)
+      : 'هنوز استفاده نشده';
+  }
+}
+function renderJudgeTable(words){
+  const body=document.getElementById('judgeRows');
+  const rows=(words||[]).filter(w=>w.a||w.m).slice(-25).reverse();
+  if(!rows.length){body.innerHTML='<tr><td colspan="12" class="zero">هنوز واژه‌ای داوری نشده…</td></tr>';return;}
+  body.innerHTML=rows.map(w=>{
+    const auto=!!w.a, manual=!!w.m, ar=Number(w.ar)||0, mr=Number(w.mr)||0;
+    const rc=ar>0?'pos':(ar<0?'neg':'zero');
+    const mc=mr>0?'pos manualscore':(mr<0?'neg manualscore':'manualscore');
+    return `<tr>
+      <td>${fnum(w.t,1)}s</td><td class="wordcell">${esc(w.w)}</td>
+      <td>${auto?TMODE[w.tm||0]:'—'}</td>
+      <td>${auto?fa(w.oq||0):'—'}</td><td>${auto?fa(w.dq||0):'—'}</td>
+      <td><b>${auto?fa(w.q||0):'—'}</b></td><td>${auto?fnum(w.bl||0,1):'—'}</td>
+      <td>${auto?signed(w.av||0,1):'—'}</td><td class="${rc}">${auto?signed(ar,3):'—'}</td>
+      <td class="${mc}">${manual?signed(mr,1):'—'}</td>
+      <td class="${w.x?'exactyes':'zero'}">${w.x?'بله':'خیر'}</td><td>${fa(w.tr||0)}</td>
+    </tr>`;
+  }).join('');
 }
 async function tick(){
   let s; try{ s=await (await fetch('/stats')).json(); }catch(e){ return; }
@@ -2377,12 +2487,17 @@ async function tick(){
   spark('c3',s.h_alive,'#c792ea');
   document.getElementById('out').textContent=s.out||'…';
   renderStream(s);
+  renderJudgeTable(s.words||[]);
+  renderTeacherStats(s);
   document.getElementById('wt').textContent=fa(s.wtotal||0);
   document.getElementById('wat').textContent=fa(s.wauto||0);
   document.getElementById('wmt').textContent=fa(s.wmanual||0);
   document.getElementById('wex').textContent=fa(s.wexact||0);
-  document.getElementById('wq').textContent=(s.wquality||0).toFixed(1);
-  document.getElementById('wa').textContent=(s.wavg||0).toFixed(2);
+  document.getElementById('wexr').textContent=fnum((s.wauto||0)?(s.wexact||0)*100/s.wauto:0,1)+'٪';
+  document.getElementById('wq').textContent=fnum(s.wquality||0,1);
+  document.getElementById('waa').textContent=signed(s.aavg||0,3);
+  document.getElementById('wbase').textContent=fnum(s.tbase||0,1);
+  document.getElementById('wpn').textContent=fa(s.wpos||0)+' / '+fa(s.wneg||0)+' / '+fa(s.wzero||0);
   document.getElementById('teacher').value=String(s.teacher||0);
   document.getElementById('tstr').value=String(s.tstrength||0);
   document.getElementById('tstrv').textContent=fa(s.tstrength||0)+'٪';
@@ -2410,9 +2525,10 @@ function renderStream(s){
   const items=[];
   (s.chat||[]).forEach(m=>items.push({t:m.t,human:1,text:m.m,id:'c'+m.id}));
   (s.words||[]).forEach(w=>items.push({t:w.t,human:0,text:w.w,id:w.id,sc:w.s,done:w.d,
-                                      q:w.q||0,x:w.x,a:w.a,m:w.m,tr:w.tr||0}));
+      q:w.q||0,oq:w.oq||0,dq:w.dq||0,tm:w.tm||0,bl:w.bl||0,av:w.av||0,
+      ar:w.ar||0,mr:w.mr||0,x:w.x,a:w.a,m:w.m,tr:w.tr||0}));
   items.sort((a,b)=>a.t-b.t);
-  const key=items.map(i=>i.id+':'+(i.sc||0)+(i.done||0)+(i.q||0)+(i.m||0)).join(',');
+  const key=items.map(i=>i.id+':'+(i.sc||0)+(i.q||0)+(i.ar||0)+(i.mr||0)).join(',');
   if(key===lastKey)return;
   lastKey=key;
   const near=el.scrollHeight-el.scrollTop-el.clientHeight<80;
@@ -2421,10 +2537,12 @@ function renderStream(s){
     if(it.human){ h+=`<div class="hw">${esc(it.text)}</div>`; continue; }
     let cls=it.done?(it.sc>0?'w sc':(it.sc<0?'w sn':'w')):'w';
     if(it.x)cls+=' exact'; if(it.m)cls+=' manual';
-    const shown=Math.abs(it.sc||0)<0.005?0:(it.sc||0);
-    const badge=it.done?`<span class="b">${shown>0?'+':''}${shown.toLocaleString('fa-IR',{maximumFractionDigits:2})}</span>`:'';
-    const title=`کیفیت ${it.q} از ۱۰۰ · ردپای ${it.tr} نورون · ${it.x?'عضو واژه‌نامه':'ناشناخته'} · ${it.m?'نمره دستی':'داوری خودکار'}`;
-    h+=`<span class="${cls}" title="${title}" data-id="${it.id}" data-w="${esc(it.text)}">${esc(it.text)}${badge}</span>`;
+    const teacherBadge=it.a?`<span class="b">معلم ${signed(it.ar,2)}</span><span class="b">Q${fa(it.q)}</span>`:'';
+    const manualBadge=it.m?`<span class="b">دستی ${signed(it.mr,1)}</span>`:'';
+    const title=it.a
+      ? `${TMODE[it.tm]} · املا ${it.oq} · دیکشنری ${it.dq} · نهایی ${it.q} · خط پایه ${fnum(it.bl,1)} · مزیت ${signed(it.av,1)} · سیگنال ${signed(it.ar,3)} · ردپا ${it.tr}`
+      : `بدون داوری خودکار · ردپا ${it.tr}`;
+    h+=`<span class="${cls}" title="${title}" data-id="${it.id}" data-w="${esc(it.text)}">${esc(it.text)}${teacherBadge}${manualBadge}</span>`;
   }
   el.innerHTML=h||'<span class="dim">هنوز کلمه‌ای تولید نشده…</span>';
   if(near&&document.getElementById('autoscroll').checked) el.scrollTop=el.scrollHeight;
@@ -2556,23 +2674,41 @@ static std::string json_stats() {
     snprintf(buf, sizeof buf,
              "\"wtotal\":%lld,\"wscored\":%lld,\"wavg\":%.3f,"
              "\"wauto\":%lld,\"wmanual\":%lld,\"wexact\":%lld,\"wquality\":%.2f,"
-             "\"areward\":%.3f,\"teacher\":%d,\"tstrength\":%d,"
-             "\"tloaded\":%s,\"lexwords\":%zu,",
+             "\"wpos\":%lld,\"wneg\":%lld,\"wzero\":%lld,"
+             "\"areward\":%.3f,\"aavg\":%.4f,\"tbase\":%.2f,"
+             "\"teacher\":%d,\"tstrength\":%d,\"tloaded\":%s,\"lexwords\":%zu,",
              (long long)s.words_total, (long long)s.words_scored, s.avg_score,
              (long long)s.words_auto, (long long)s.words_manual, (long long)s.words_exact,
-             s.avg_quality, (double)s.auto_reward_total / MANA,
-             g_teacher_mode.load(), g_teacher_strength.load(),
+             s.avg_quality, (long long)s.words_positive, (long long)s.words_negative,
+             (long long)s.words_neutral, (double)s.auto_reward_total / MANA,
+             s.words_auto ? (double)s.auto_reward_total / s.words_auto / MANA : 0.0,
+             s.teacher_baseline, g_teacher_mode.load(), g_teacher_strength.load(),
              g_lexicon.loaded ? "true" : "false", g_lexicon.freq.size());
     j += buf;
+
+    j += "\"tcount\":[";
+    for (int m = 0; m < 4; ++m) { snprintf(buf,sizeof buf,"%s%lld",m?",":"",(long long)s.teacher_count[m]); j+=buf; }
+    j += "],\"tbases\":[";
+    for (int m = 0; m < 4; ++m) { snprintf(buf,sizeof buf,"%s%.3f",m?",":"",s.teacher_baseline_by_mode[m]); j+=buf; }
+    j += "],\"tqavg\":[";
+    for (int m = 0; m < 4; ++m) { snprintf(buf,sizeof buf,"%s%.3f",m?",":"",s.teacher_quality_avg[m]); j+=buf; }
+    j += "],\"travg\":[";
+    for (int m = 0; m < 4; ++m) { snprintf(buf,sizeof buf,"%s%.4f",m?",":"",s.teacher_reward_avg[m]); j+=buf; }
+    j += "],";
 
     j += "\"words\":[";
     for (size_t i = 0; i < s.words.size(); ++i) {
         const OutWord& w = s.words[i];
         snprintf(buf, sizeof buf,
                  "%s{\"id\":%u,\"t\":%.1f,\"s\":%.3f,\"d\":%s,"
-                 "\"q\":%d,\"x\":%s,\"a\":%s,\"m\":%s,\"tr\":%zu,\"w\":\"",
+                 "\"q\":%d,\"oq\":%d,\"dq\":%d,\"tm\":%u,"
+                 "\"bl\":%.2f,\"av\":%.2f,\"ar\":%.3f,\"mr\":%.3f,"
+                 "\"x\":%s,\"a\":%s,\"m\":%s,\"tr\":%zu,\"w\":\"",
                  i ? "," : "", w.id, w.t, (double)w.score_milli / MANA,
                  w.scored ? "true" : "false", w.quality,
+                 w.spelling_quality, w.dictionary_quality, (unsigned)w.teacher_mode,
+                 w.teacher_baseline, w.teacher_advantage,
+                 (double)w.auto_reward / MANA, (double)w.manual_reward / MANA,
                  w.exact ? "true" : "false", w.auto_scored ? "true" : "false",
                  w.manual_scored ? "true" : "false", w.trace.size());
         j += buf; j += esc(w.text); j += "\"}";
