@@ -29,7 +29,7 @@ function Fail($s) { Write-Host "  [!] $s" -ForegroundColor Red }
 
 Write-Host ''
 Write-Host '  ===============================================' -ForegroundColor Cyan
-Write-Host '    smile — local compute test' -ForegroundColor Cyan
+Write-Host '    smile - local compute test' -ForegroundColor Cyan
 Write-Host '  ===============================================' -ForegroundColor Cyan
 Write-Host "  folder: $Dir"
 Write-Host ''
@@ -102,7 +102,7 @@ if ($Gpu -and $hasNvidia) {
         Fail 'CUDA Toolkit compiler (nvcc) was not found.'
         Write-Host ''
         Write-Host '  Install requirements, restart PowerShell, then run this script again:' -ForegroundColor Yellow
-        Write-Host '  1) Visual Studio Build Tools 2022 → Desktop development with C++'
+        Write-Host '  1) Visual Studio Build Tools 2022 -> Desktop development with C++'
         Write-Host '  2) CUDA Toolkit'
         Write-Host '     GTX 900/10 series: use CUDA 12.9 (CUDA 13 cannot compile for pre-Turing GPUs).'
         Write-Host '     GTX 16 series: CUDA 12.9 or 13.x.'
