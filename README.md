@@ -9,6 +9,7 @@ Temporary anonymous compute prototype for a local CPU/CUDA validation run.
 - `persian_words.tsv` — curated UTF-8 Persian dictionary (readable TSV)
 - `my_words.tsv` — personal verified/suggested/blocked words; safe to edit
 - `run.ps1` — local Windows build/run script
+- `smile.exe` — prebuilt Windows CPU executable in the downloadable CPU package
 - `brain.dat` — generated checkpoint
 
 ## Persian dictionary and personal suggestions
@@ -63,15 +64,15 @@ powershell -ExecutionPolicy Bypass -File .\run.ps1 -Gpu
 CUDA-test defaults:
 
 ```text
-neurons       128,000 (fixed real brain, no synthetic duplication)
+neurons       32,000 (fixed real brain, no synthetic duplication)
 GPU ceiling   70% (hard maximum; configurable from 10% to 70%)
 duration      120 seconds
 device        0
 ```
 
-The first CPU run at the new size archives any existing checkpoint as `brain-before-128k-<date>.dat` and starts a clean 128k brain. Later runs continue the new `brain.dat`.
+The first CPU run after this size change archives any existing checkpoint as `brain-before-32k-<date>.dat` and starts a clean 32k brain. Later runs continue the new `brain.dat`. The engine also rejects a loaded checkpoint whose neuron count differs from the requested count.
 
-Measured in the two-logical-CPU sandbox, 128k used about **342 MiB peak RAM** and created a **52 MiB checkpoint**. A 10-virtual-second stability run took **74.4 wall seconds**, processed 180.5M events, ended near 5.61 Hz/neuron and 40% pools, with zero deaths and zero VM faults. It is stable but only about `0.13×` virtual speed on that small CPU; more real cores are needed for comfortable CPU-only training.
+Measured in the two-logical-CPU sandbox, the current 32k build used about **98 MiB peak RAM** and created a **12.8 MiB checkpoint**. Building the brain, running one virtual second and saving took **3.1 wall seconds**, processing 4.73M events with zero VM faults.
 
 Custom duration or a lower ceiling (10–70%):
 
@@ -90,7 +91,7 @@ The script detects the GPU compute capability, builds the native `sm_XX` target,
 
 ### Important interpretation
 
-`70%` is a **hard ceiling**, not fake target padding. With only 128,000 real neurons, a strong GTX may naturally remain below 70%. The program does not duplicate work just to make Task Manager show a larger number.
+`70%` is a **hard ceiling**, not fake target padding. With only 32,000 real neurons, a strong GTX may naturally remain below 70%. The program does not duplicate work just to make Task Manager show a larger number.
 
 The corrected source has been compiled and linked with the real NVIDIA NVCC 13.3 compiler for `sm_75`, and the resulting binary's `--help` path was executed. That proves the CUDA translation unit builds for Turing; it does **not** claim a GPU runtime test. GTX 900/10-series hardware still needs the documented CUDA 12.9 target-machine build and run.
 
@@ -114,7 +115,7 @@ This is not a matrix-multiplication stress test. It validates the mass-neuron CU
 
 ## CPU fallback
 
-The full 128k CPU application is now the default while no strong GPU test machine is available:
+The full 32k CPU application is now the default while no strong GPU test machine is available:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\run.ps1
@@ -122,7 +123,7 @@ powershell -ExecutionPolicy Bypass -File .\run.ps1
 
 `-Cpu` remains accepted as an explicit alias.
 
-It builds `smile.exe`, continues `brain.dat` when present, and opens:
+The complete CPU package can use its bundled `smile.exe` without a compiler. If `g++` is installed, the runner rebuilds it from `smile.cpp`. It then continues a matching `brain.dat` when present and opens:
 
 ```text
 http://localhost:8420
@@ -132,14 +133,14 @@ Manual build on Linux/macOS:
 
 ```bash
 g++ -O2 -std=c++17 -pthread smile.cpp -o smile
-./smile --neurons 128000 --port 8420 --words persian_words.tsv
+./smile --neurons 32000 --port 8420 --words persian_words.tsv
 ```
 
 Manual CUDA build on Linux (add your GPU architecture):
 
 ```bash
 nvcc -O3 -std=c++17 -arch=sm_75 smile_cuda.cu -o smile-gpu -ldl
-./smile-gpu --neurons 128000 --gpu-limit 70 --seconds 120
+./smile-gpu --neurons 32000 --gpu-limit 70 --seconds 120
 ```
 
 ## Test report to keep

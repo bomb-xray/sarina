@@ -1705,12 +1705,8 @@ static bool load_brain(const char* path) {
     char magic[8];
     const char current_magic[8] = {'S','M','I','L','E','0','0','5'};
     const char v4_magic[8]      = {'S','M','I','L','E','0','0','4'};
-    // Legacy checkpoint signature is kept as byte values so old trained brains
-    // remain loadable without exposing the previous temporary codename.
-    const unsigned char legacy_magic[8] = {0x53,0x41,0x52,0x49,0x4E,0x41,0x30,0x33};
     if (fread(magic,1,8,f) != 8 ||
-        (memcmp(magic,current_magic,8) && memcmp(magic,v4_magic,8) &&
-         memcmp(magic,legacy_magic,8))) {
+        (memcmp(magic,current_magic,8) && memcmp(magic,v4_magic,8))) {
         fclose(f); return false;
     }
     bool has_plasticity = memcmp(magic,current_magic,8) == 0;
@@ -2195,8 +2191,7 @@ static void sim_loop() {
         // دارند و پنجره‌ها به ترتیب پیش می‌روند، پس صف ذاتاً مرتب می‌ماند.
         // (پیش‌تر std::sort روی ~۵۰۰ هزار عنصر در هر پنجره اجرا می‌شد
         //  که کل موتور را از کار می‌انداخت.)
-        // ثبت مرگ‌ها: پیمایش کل جمعیت در هر پنجره گران است
-        // (۱۲۸ هزار نورون × ۱۰۰۰ پنجره در ثانیه). فقط هر ۵۰ پنجره یک بار.
+        // ثبت مرگ‌ها: پیمایش کل جمعیت گران است؛ فقط هر ۵۰ پنجره یک بار.
         if (++death_sweep >= 50) {
             death_sweep = 0;
             for (auto& nu : B.n)
@@ -2953,7 +2948,7 @@ static void open_browser(int port) {
 
 int main(int argc, char** argv) {
     console_utf8();
-    int  N = 128000, port = 8420, headless_s = 0;
+    int  N = 32000, port = 8420, headless_s = 0;
     u64  seed = 12345;
     const char* loadf = nullptr;
 
@@ -3007,9 +3002,14 @@ int main(int argc, char** argv) {
         g_teacher_mode.store(0);
     }
 
-    if (loadf && load_brain(loadf)) {
+    bool checkpoint_loaded = loadf && load_brain(loadf);
+    if (checkpoint_loaded && B.n.size() == (size_t)N) {
         printf("  بارگذاری از چک‌پوینت: %s  (%zu نورون)\n", loadf, B.n.size());
     } else {
+        if (checkpoint_loaded) {
+            printf("  [!] چک‌پوینت %zu نورون دارد؛ اندازه‌ی درخواستی %d است. مغز تازه ساخته می‌شود.\n",
+                   B.n.size(), N);
+        }
         build_brain(N, seed);
         int nn=0,nm=0,ng=0;
         for (auto& x : B.n) (x.kind==K_NORMAL?nn:x.kind==K_MEMORY?nm:ng)++;

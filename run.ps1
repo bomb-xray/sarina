@@ -146,10 +146,10 @@ if ($Gpu -and $hasNvidia) {
         exit 6
     }
     Good "built: $gpuExe"
-    Info "running 128,000 real neurons; GPU utilization ceiling = $GpuLimit%; duration = $Seconds s"
-    Write-Host "  A value below $($GpuLimit)% is valid: fixed 128k may still be too small for the GPU." -ForegroundColor Yellow
+    Info "running 32,000 real neurons; GPU utilization ceiling = $GpuLimit%; duration = $Seconds s"
+    Write-Host "  A value below $($GpuLimit)% is valid: fixed 32k may still be too small for the GPU." -ForegroundColor Yellow
     Write-Host ''
-    & $gpuExe --neurons 128000 --gpu-limit $GpuLimit --seconds $Seconds --device $Device
+    & $gpuExe --neurons 32000 --gpu-limit $GpuLimit --seconds $Seconds --device $Device
     exit $LASTEXITCODE
 }
 
@@ -160,27 +160,41 @@ if (-not (Test-Path '.\my_words.tsv')) {
     @('# personal words: word<TAB>frequency<TAB>status<TAB>note') | Set-Content '.\my_words.tsv' -Encoding UTF8
 }
 $gpp = Find-Tool 'g++' @('C:\msys64\ucrt64\bin\g++.exe','C:\msys64\mingw64\bin\g++.exe','C:\mingw64\bin\g++.exe')
-if (-not $gpp) { Fail 'g++ was not found. Install MSYS2/UCRT64 or run on the CUDA machine after installing its tools.'; exit 7 }
 $cpuExe = Join-Path $Dir 'smile.exe'
-Remove-Item $cpuExe -Force -ErrorAction SilentlyContinue
-Info 'building portable CPU fallback...'
-& $gpp '-O2' '-std=c++17' '-pthread' '.\smile.cpp' '-o' $cpuExe '-lws2_32' '-static'
-if (-not (Test-Path $cpuExe)) { Fail 'CPU build failed.'; exit 8 }
-# First 128k run must not silently reload an older 32k/dirty checkpoint.
-$sizeMarker = Join-Path $Dir '.brain-size-128000'
-if (-not (Test-Path $sizeMarker)) {
+if ($gpp) {
+    Remove-Item $cpuExe -Force -ErrorAction SilentlyContinue
+    Info 'building portable CPU application...'
+    & $gpp '-O2' '-std=c++17' '-pthread' '.\smile.cpp' '-o' $cpuExe '-lws2_32' '-static'
+    if (-not (Test-Path $cpuExe)) { Fail 'CPU build failed.'; exit 8 }
+} elseif (Test-Path $cpuExe) {
+    Warn 'g++ was not found; using the bundled prebuilt CPU executable.'
+} else {
+    Fail 'Neither g++ nor the bundled smile.exe was found.'
+    Write-Host '  Download the complete CPU package again, or install MSYS2/UCRT64.'
+    exit 7
+}
+# A single content marker supersedes legacy per-size markers. On a size change,
+# preserve the old checkpoint and force a clean brain with the requested size.
+$requestedSize = '32000'
+$sizeMarker = Join-Path $Dir '.brain-size-current'
+$currentSize = ''
+if (Test-Path $sizeMarker) {
+    $currentSize = [string](Get-Content $sizeMarker -Raw -ErrorAction SilentlyContinue)
+    $currentSize = $currentSize.Trim()
+}
+if ($currentSize -ne $requestedSize) {
     if (Test-Path '.\brain.dat') {
-        $backup = Join-Path $Dir ("brain-before-128k-{0}.dat" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+        $backup = Join-Path $Dir ("brain-before-32k-{0}.dat" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
         Copy-Item '.\brain.dat' $backup -Force
         Remove-Item '.\brain.dat' -Force
         Warn "old checkpoint archived: $backup"
     }
-    '128000' | Set-Content $sizeMarker -Encoding ASCII
+    $requestedSize | Set-Content $sizeMarker -Encoding ASCII
 }
-$args = '--neurons 128000 --port 8420 --words persian_words.tsv --user-words my_words.tsv'
-if (Test-Path '.\brain.dat') { $args += ' --load brain.dat'; Good 'continuing 128k brain.dat' }
-$proc = Start-Process $cpuExe -ArgumentList $args -WorkingDirectory $Dir -PassThru
-Info 'building/loading 128k brain; waiting for dashboard...'
+$cpuArgs = "--neurons $requestedSize --port 8420 --words persian_words.tsv --user-words my_words.tsv"
+if (Test-Path '.\brain.dat') { $cpuArgs += ' --load brain.dat'; Good 'continuing 32k brain.dat' }
+$proc = Start-Process $cpuExe -ArgumentList $cpuArgs -WorkingDirectory $Dir -PassThru
+Info 'building/loading 32k brain; waiting for dashboard...'
 $ready = $false
 foreach ($i in 1..120) {
     Start-Sleep -Milliseconds 500
