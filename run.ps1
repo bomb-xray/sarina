@@ -1,8 +1,9 @@
 # smile local CPU/CUDA runner for Windows
-# GPU test: powershell -ExecutionPolicy Bypass -File .\run.ps1
-# CPU app : powershell -ExecutionPolicy Bypass -File .\run.ps1 -Cpu
+# CPU app : powershell -ExecutionPolicy Bypass -File .\run.ps1
+# GPU test: powershell -ExecutionPolicy Bypass -File .\run.ps1 -Gpu
 param(
     [switch]$Cpu,
+    [switch]$Gpu,
     [ValidateRange(10,100)][int]$GpuLimit = 70,
     [ValidateRange(0,86400)][int]$Seconds = 120,
     [ValidateRange(0,16)][int]$Device = 0
@@ -19,6 +20,7 @@ try {
 $Dir = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
 Set-Location $Dir
 $Port = 8420
+if ($Cpu -and $Gpu) { throw 'Choose either -Cpu or -Gpu, not both.' }
 
 function Info($s) { Write-Host "  $s" -ForegroundColor Cyan }
 function Good($s) { Write-Host "  $s" -ForegroundColor Green }
@@ -88,7 +90,12 @@ if ($nvsmi) {
     }
 }
 
-if (-not $Cpu -and $hasNvidia) {
+if ($Gpu -and -not $hasNvidia) {
+    Fail 'No NVIDIA CUDA device was detected. Run without -Gpu for the CPU application.'
+    exit 3
+}
+
+if ($Gpu -and $hasNvidia) {
     Info "NVIDIA GPU: $gpuName"
     if ($compute) { Info "compute capability: $compute" }
     if (-not $nvcc) {
@@ -139,10 +146,10 @@ if (-not $Cpu -and $hasNvidia) {
         exit 6
     }
     Good "built: $gpuExe"
-    Info "running 32,000 real neurons; GPU utilization ceiling = $GpuLimit%; duration = $Seconds s"
-    Write-Host '  A value below 70% is valid: fixed 32k may be too small for the GPU.' -ForegroundColor Yellow
+    Info "running 128,000 real neurons; GPU utilization ceiling = $GpuLimit%; duration = $Seconds s"
+    Write-Host '  A value below 70% is valid: fixed 128k may still be too small for the GPU.' -ForegroundColor Yellow
     Write-Host ''
-    & $gpuExe --neurons 32000 --gpu-limit $GpuLimit --seconds $Seconds --device $Device
+    & $gpuExe --neurons 128000 --gpu-limit $GpuLimit --seconds $Seconds --device $Device
     exit $LASTEXITCODE
 }
 
@@ -159,9 +166,33 @@ Remove-Item $cpuExe -Force -ErrorAction SilentlyContinue
 Info 'building portable CPU fallback...'
 & $gpp '-O2' '-std=c++17' '-pthread' '.\smile.cpp' '-o' $cpuExe '-lws2_32' '-static'
 if (-not (Test-Path $cpuExe)) { Fail 'CPU build failed.'; exit 8 }
-$args = '--neurons 32000 --port 8420 --words persian_words.tsv --user-words my_words.tsv'
-if (Test-Path '.\brain.dat') { $args += ' --load brain.dat'; Good 'continuing brain.dat' }
-Start-Process $cpuExe -ArgumentList $args -WorkingDirectory $Dir
-Start-Sleep 2
-Start-Process 'http://localhost:8420'
-Good 'CPU dashboard: http://localhost:8420'
+# First 128k run must not silently reload an older 32k/dirty checkpoint.
+$sizeMarker = Join-Path $Dir '.brain-size-128000'
+if (-not (Test-Path $sizeMarker)) {
+    if (Test-Path '.\brain.dat') {
+        $backup = Join-Path $Dir ("brain-before-128k-{0}.dat" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+        Copy-Item '.\brain.dat' $backup -Force
+        Remove-Item '.\brain.dat' -Force
+        Warn "old checkpoint archived: $backup"
+    }
+    '128000' | Set-Content $sizeMarker -Encoding ASCII
+}
+$args = '--neurons 128000 --port 8420 --words persian_words.tsv --user-words my_words.tsv'
+if (Test-Path '.\brain.dat') { $args += ' --load brain.dat'; Good 'continuing 128k brain.dat' }
+$proc = Start-Process $cpuExe -ArgumentList $args -WorkingDirectory $Dir -PassThru
+Info 'building/loading 128k brain; waiting for dashboard...'
+$ready = $false
+foreach ($i in 1..120) {
+    Start-Sleep -Milliseconds 500
+    if ($proc.HasExited) { Fail "CPU process exited with code $($proc.ExitCode)."; exit 9 }
+    try {
+        $r = Invoke-WebRequest 'http://localhost:8420/stats' -UseBasicParsing -TimeoutSec 2
+        if ($r.StatusCode -eq 200) { $ready = $true; break }
+    } catch { }
+}
+if ($ready) {
+    Start-Process 'http://localhost:8420'
+    Good 'CPU dashboard: http://localhost:8420'
+} else {
+    Warn 'brain is still starting; open http://localhost:8420 manually in a moment.'
+}

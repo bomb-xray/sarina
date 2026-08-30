@@ -2196,7 +2196,7 @@ static void sim_loop() {
         // (پیش‌تر std::sort روی ~۵۰۰ هزار عنصر در هر پنجره اجرا می‌شد
         //  که کل موتور را از کار می‌انداخت.)
         // ثبت مرگ‌ها: پیمایش کل جمعیت در هر پنجره گران است
-        // (۳۲ هزار نورون × ۱۰۰۰ پنجره در ثانیه). فقط هر ۵۰ پنجره یک بار.
+        // (۱۲۸ هزار نورون × ۱۰۰۰ پنجره در ثانیه). فقط هر ۵۰ پنجره یک بار.
         if (++death_sweep >= 50) {
             death_sweep = 0;
             for (auto& nu : B.n)
@@ -2953,7 +2953,7 @@ static void open_browser(int port) {
 
 int main(int argc, char** argv) {
     console_utf8();
-    int  N = 32000, port = 8420, headless_s = 0;
+    int  N = 128000, port = 8420, headless_s = 0;
     u64  seed = 12345;
     const char* loadf = nullptr;
 

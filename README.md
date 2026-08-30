@@ -57,22 +57,26 @@ Toolkit compatibility matters:
 Open PowerShell in this folder:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\run.ps1
+powershell -ExecutionPolicy Bypass -File .\run.ps1 -Gpu
 ```
 
-Defaults:
+CUDA-test defaults:
 
 ```text
-neurons       32,000 (fixed real brain, no synthetic duplication)
+neurons       128,000 (fixed real brain, no synthetic duplication)
 GPU ceiling   70%
 duration      120 seconds
 device        0
 ```
 
+The first CPU run at the new size archives any existing checkpoint as `brain-before-128k-<date>.dat` and starts a clean 128k brain. Later runs continue the new `brain.dat`.
+
+Measured in the two-logical-CPU sandbox, 128k used about **342 MiB peak RAM** and created a **52 MiB checkpoint**. A 10-virtual-second stability run took **74.4 wall seconds**, processed 180.5M events, ended near 5.61 Hz/neuron and 40% pools, with zero deaths and zero VM faults. It is stable but only about `0.13×` virtual speed on that small CPU; more real cores are needed for comfortable CPU-only training.
+
 Custom duration or ceiling:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\run.ps1 -GpuLimit 70 -Seconds 300
+powershell -ExecutionPolicy Bypass -File .\run.ps1 -Gpu -GpuLimit 70 -Seconds 300
 ```
 
 The script detects the GPU compute capability, builds the native `sm_XX` target, runs the CUDA core and prints every half second:
@@ -86,7 +90,7 @@ The script detects the GPU compute capability, builds the native `sm_XX` target,
 
 ### Important interpretation
 
-`70%` is a **ceiling**, not fake target padding. With only 32,000 real neurons, a strong GTX may naturally remain below 70%. The program does not duplicate work just to make Task Manager show a larger number.
+`70%` is a **ceiling**, not fake target padding. With only 128,000 real neurons, a strong GTX may naturally remain below 70%. The program does not duplicate work just to make Task Manager show a larger number.
 
 On Windows Task Manager select the GPU graph named **CUDA** or **Compute**, not only `3D`. The console's NVML value is the primary measurement.
 
@@ -108,11 +112,13 @@ This is not a matrix-multiplication stress test. It validates the mass-neuron CU
 
 ## CPU fallback
 
-The full portable application remains available:
+The full 128k CPU application is now the default while no strong GPU test machine is available:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\run.ps1 -Cpu
+powershell -ExecutionPolicy Bypass -File .\run.ps1
 ```
+
+`-Cpu` remains accepted as an explicit alias.
 
 It builds `smile.exe`, continues `brain.dat` when present, and opens:
 
@@ -124,14 +130,14 @@ Manual build on Linux/macOS:
 
 ```bash
 g++ -O2 -std=c++17 -pthread smile.cpp -o smile
-./smile --neurons 32000 --port 8420 --words persian_words.tsv
+./smile --neurons 128000 --port 8420 --words persian_words.tsv
 ```
 
 Manual CUDA build on Linux (add your GPU architecture):
 
 ```bash
 nvcc -O3 -std=c++17 -arch=sm_75 smile_cuda.cu -o smile-gpu -ldl
-./smile-gpu --neurons 32000 --gpu-limit 70 --seconds 120
+./smile-gpu --neurons 128000 --gpu-limit 70 --seconds 120
 ```
 
 ## Test report to keep

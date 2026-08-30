@@ -3,6 +3,8 @@ smile.exe
 smile-gpu
 smile-gpu.exe
 brain.dat
+brain-before-*.dat
+.brain-size-*
 *.o
 gmon.out
 *.zip
