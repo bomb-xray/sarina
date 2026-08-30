@@ -4,9 +4,9 @@
 param(
     [switch]$Cpu,
     [switch]$Gpu,
-    [ValidateRange(10,100)][int]$GpuLimit = 70,
+    [ValidateRange(10,70)][int]$GpuLimit = 70,
     [ValidateRange(0,86400)][int]$Seconds = 120,
-    [ValidateRange(0,16)][int]$Device = 0
+    [ValidateRange(0,255)][int]$Device = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -82,11 +82,11 @@ $gpuName = ''
 $compute = ''
 if ($nvsmi) {
     try {
-        $gpuName = (& $nvsmi '--query-gpu=name' '--format=csv,noheader,nounits' | Select-Object -First 1).Trim()
-        $compute = (& $nvsmi '--query-gpu=compute_cap' '--format=csv,noheader,nounits' | Select-Object -First 1).Trim()
+        $gpuName = (& $nvsmi "--id=$Device" '--query-gpu=name' '--format=csv,noheader,nounits' | Select-Object -First 1).Trim()
+        $compute = (& $nvsmi "--id=$Device" '--query-gpu=compute_cap' '--format=csv,noheader,nounits' | Select-Object -First 1).Trim()
         $hasNvidia = [bool]$gpuName
     } catch {
-        try { $gpuName = (& $nvsmi '--query-gpu=name' '--format=csv,noheader' | Select-Object -First 1).Trim(); $hasNvidia=[bool]$gpuName } catch { }
+        try { $gpuName = (& $nvsmi "--id=$Device" '--query-gpu=name' '--format=csv,noheader' | Select-Object -First 1).Trim(); $hasNvidia=[bool]$gpuName } catch { }
     }
 }
 
@@ -147,7 +147,7 @@ if ($Gpu -and $hasNvidia) {
     }
     Good "built: $gpuExe"
     Info "running 128,000 real neurons; GPU utilization ceiling = $GpuLimit%; duration = $Seconds s"
-    Write-Host '  A value below 70% is valid: fixed 128k may still be too small for the GPU.' -ForegroundColor Yellow
+    Write-Host "  A value below $($GpuLimit)% is valid: fixed 128k may still be too small for the GPU." -ForegroundColor Yellow
     Write-Host ''
     & $gpuExe --neurons 128000 --gpu-limit $GpuLimit --seconds $Seconds --device $Device
     exit $LASTEXITCODE

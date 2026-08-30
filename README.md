@@ -64,7 +64,7 @@ CUDA-test defaults:
 
 ```text
 neurons       128,000 (fixed real brain, no synthetic duplication)
-GPU ceiling   70%
+GPU ceiling   70% (hard maximum; configurable from 10% to 70%)
 duration      120 seconds
 device        0
 ```
@@ -73,7 +73,7 @@ The first CPU run at the new size archives any existing checkpoint as `brain-bef
 
 Measured in the two-logical-CPU sandbox, 128k used about **342 MiB peak RAM** and created a **52 MiB checkpoint**. A 10-virtual-second stability run took **74.4 wall seconds**, processed 180.5M events, ended near 5.61 Hz/neuron and 40% pools, with zero deaths and zero VM faults. It is stable but only about `0.13×` virtual speed on that small CPU; more real cores are needed for comfortable CPU-only training.
 
-Custom duration or ceiling:
+Custom duration or a lower ceiling (10–70%):
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\run.ps1 -Gpu -GpuLimit 70 -Seconds 300
@@ -90,7 +90,9 @@ The script detects the GPU compute capability, builds the native `sm_XX` target,
 
 ### Important interpretation
 
-`70%` is a **ceiling**, not fake target padding. With only 128,000 real neurons, a strong GTX may naturally remain below 70%. The program does not duplicate work just to make Task Manager show a larger number.
+`70%` is a **hard ceiling**, not fake target padding. With only 128,000 real neurons, a strong GTX may naturally remain below 70%. The program does not duplicate work just to make Task Manager show a larger number.
+
+The corrected source has been compiled and linked with the real NVIDIA NVCC 13.3 compiler for `sm_75`, and the resulting binary's `--help` path was executed. That proves the CUDA translation unit builds for Turing; it does **not** claim a GPU runtime test. GTX 900/10-series hardware still needs the documented CUDA 12.9 target-machine build and run.
 
 On Windows Task Manager select the GPU graph named **CUDA** or **Compute**, not only `3D`. The console's NVML value is the primary measurement.
 

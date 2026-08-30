@@ -30,11 +30,12 @@ using i32 = int32_t; using i64 = int64_t;
 
 static constexpr int NORMAL=0, MEMORY=1, GIANT=2;
 static constexpr int INPUT=0, CENTRAL=1, OUTPUT=2;
-static constexpr int HEALTHY=0, IGNORE=1, SPAM=2, DORMANT=3, ASLEEP=4, DEAD=5;
-static constexpr int LINES[3]={20,40,60};
-static constexpr int MEM_BYTES[3]={32,1024,4096};
+static constexpr int HEALTHY=0, IGNORE=1, DORMANT=3, ASLEEP=4, DEAD=5;
+[[maybe_unused]] static constexpr int SPAM=2;
 static constexpr i64 CAP[3]={20000,40000,120000};
-static constexpr int CADENCE_MS[3]={10,15,50};
+static __host__ __device__ constexpr int line_count(int kind){return kind==NORMAL?20:(kind==MEMORY?40:60);}
+static __host__ __device__ constexpr int memory_bytes(int kind){return kind==NORMAL?32:(kind==MEMORY?1024:4096);}
+static __host__ __device__ constexpr int cadence_ms(int kind){return kind==NORMAL?10:(kind==MEMORY?15:50);}
 static constexpr int MAX_LINES=60;
 static constexpr int SIGNAL_RING=21;
 static constexpr int TRANSIT_SLOTS=16;
@@ -104,7 +105,7 @@ __device__ __forceinline__ i32 rd(u16 im,i32* r){if(!(im&0x8000))return r[im&15]
 struct VmD {u64 mask=0,bits=0;int fired=0,fault=0,sleep=0;};
 
 __device__ VmD run_vm(DeviceView v,int id,u32 now){
- NeuronD& n=v.neurons[id]; VmD out; i32 r[16]={0}; int nl=LINES[n.kind], inpop=__popcll(n.in_bits),fresh=0;
+ NeuronD& n=v.neurons[id]; VmD out; i32 r[16]={0}; int nl=line_count(n.kind), inpop=__popcll(n.in_bits),fresh=0;
  for(int i=0;i<nl;i++){u32 t=v.in_at[(size_t)id*MAX_LINES+i];if(t!=NEVER&&now-t<50)fresh++;}
  int manapct=n.cap>0?(int)(n.mana*100/n.cap):0; int poolpct=v.targets[n.lobe]?(int)(v.pools[n.lobe]*100/v.targets[n.lobe]):0;
  int tsf=n.last_fire==NEVER?30000:(int)min((u32)30000,now-n.last_fire); int tsi=n.last_input==NEVER?30000:(int)min((u32)30000,now-n.last_input);
@@ -112,7 +113,7 @@ __device__ VmD run_vm(DeviceView v,int id,u32 now){
  while(pc>=0&&pc<len&&fuel<cap){fuel++;u32 ins=C_CODE[off+pc++];u8 op=ins>>24,d=(ins>>20)&15,a=(ins>>16)&15;u16 im=ins;
   switch(op){case OP_NOP:break;case OP_IMM:r[d]=rd(im,r);break;case OP_MOV:r[d]=r[a];break;case OP_ADD:r[d]=r[a]+rd(im,r);break;case OP_SUB:r[d]=r[a]-rd(im,r);break;case OP_MUL:r[d]=(i32)(((i64)r[a]*rd(im,r))&0x7fffffff);break;case OP_DIV:{i32 x=rd(im,r);r[d]=x?r[a]/x:0;break;}case OP_MOD:{i32 x=rd(im,r);r[d]=x?r[a]%x:0;break;}
   case OP_AND:r[d]=r[a]&rd(im,r);break;case OP_OR:r[d]=r[a]|rd(im,r);break;case OP_XOR:r[d]=r[a]^rd(im,r);break;case OP_NOT:r[d]=~r[a];break;case OP_SHL:r[d]=(i32)((u32)r[a]<<(rd(im,r)&31));break;case OP_SHR:r[d]=(i32)((u32)r[a]>>(rd(im,r)&31));break;case OP_EQ:r[d]=r[a]==rd(im,r);break;case OP_LT:r[d]=r[a]<rd(im,r);break;case OP_GT:r[d]=r[a]>rd(im,r);break;case OP_SEL:r[d]=r[a]?r[(im>>4)&15]:r[im&15];break;
-  case OP_LD:{int sz=MEM_BYTES[n.kind],p=(r[a]+(im&0x7fff))%sz;if(p<0)p+=sz;r[d]=v.memory[n.mem_off+p];break;}case OP_ST:{int sz=MEM_BYTES[n.kind],p=(r[a]+(im&0x7fff))%sz;if(p<0)p+=sz;v.memory[n.mem_off+p]=(u8)r[d];break;}
+  case OP_LD:{int sz=memory_bytes(n.kind),p=(r[a]+(im&0x7fff))%sz;if(p<0)p+=sz;r[d]=v.memory[n.mem_off+p];break;}case OP_ST:{int sz=memory_bytes(n.kind),p=(r[a]+(im&0x7fff))%sz;if(p<0)p+=sz;v.memory[n.mem_off+p]=(u8)r[d];break;}
   case OP_SENSE:{u16 ch=im&0x7fff;i32 x=0;if(ch>=SN_LINE0){int li=ch-SN_LINE0;x=li<nl?((n.in_bits>>li)&1):0;}else switch(ch){case SN_INPOP:x=inpop;break;case SN_INBITS:x=(i32)n.in_bits;break;case SN_FRESHPOP:x=fresh;break;case SN_MANA:x=n.mana/1000;break;case SN_MANAPCT:x=manapct;break;case SN_TSF:x=tsf;break;case SN_TSI:x=tsi;break;case SN_POOLPCT:x=poolpct;break;case SN_NOISE:x=(i32)(((rng_next(n.rng)>>32)&255)*v.temperature/255);break;}r[d]=x;break;}
   case OP_FIRE:{u64 m=(u32)r[a];if(nl<64)m&=((1ull<<nl)-1);if(m){out.fired=1;out.mask=m;out.bits=(u32)rd(im,r);}break;}case OP_SLEEP:out.sleep=1;pc=-1;break;
   case OP_LOOP:if(loop){loop_pc=pc;loop_n=min(rd(im,r),8);loop_i=0;if(loop_n<=0){int dep=1;while(pc<len&&dep){u8 x=C_CODE[off+pc]>>24;if(x==OP_LOOP)dep++;if(x==OP_ENDL)dep--;pc++;}loop_pc=-1;}break;}case OP_ENDL:if(loop){if(loop_pc>=0&&++loop_i<loop_n)pc=loop_pc;else loop_pc=-1;}break;case OP_HALT:pc=-1;break;default:break;}
@@ -130,10 +131,10 @@ __global__ void eval_kernel(DeviceView v){int id=blockIdx.x*blockDim.x+threadIdx
  u32 dt=now-n.last_eval;n.last_eval=now;i64 upkeep=n.cap*20*(i64)dt/1000000;if(n.state==DORMANT)upkeep/=10;n.mana-=upkeep;if(upkeep>0){int sl=((now+TRANSIT_MS)/SYS_MS)%TRANSIT_SLOTS;atomicAdd((unsigned long long*)&v.transit[n.lobe*TRANSIT_SLOTS+sl],(u64)upkeep);}
  if(n.mana<n.cap){u64 want=n.cap-n.mana;u64 share=15+min(85,(int)n.credit/180);u64 got=atomic_take(&v.pools[n.lobe],want*share/100);n.mana+=(i64)got;}
  u32 decay=(u32)n.credit*dt/5000;n.credit=n.credit>decay?n.credit-decay:0;if(n.mana<=0){n.mana=0;n.state=IGNORE;}else if(n.mana*100<n.cap*20)n.state=IGNORE;else if(n.state==IGNORE)n.state=HEALTHY;
- int cadence=CADENCE_MS[n.kind];if(n.state==IGNORE||n.state==ASLEEP){n.next_eval=now+cadence;return;}if(n.last_input!=NEVER&&now-n.last_input>30000&&n.last_fire!=NEVER&&now-n.last_fire>30000)n.state=DORMANT;if(n.state==DORMANT)cadence*=10;
+ int cadence=cadence_ms(n.kind);if(n.state==IGNORE||n.state==ASLEEP){n.next_eval=now+cadence;return;}if(n.last_input!=NEVER&&now-n.last_input>30000&&n.last_fire!=NEVER&&now-n.last_fire>30000)n.state=DORMANT;if(n.state==DORMANT)cadence*=10;
  VmD r=run_vm(v,id,now);if(r.fault){n.state=ASLEEP;atomicAdd((unsigned long long*)&v.counters->faults,1ull);n.next_eval=now+cadence*4;return;}if(r.sleep){n.next_eval=now+cadence*3;return;}
  int refractory=n.is_mouth?600:40;bool blocked=n.last_fire!=NEVER&&now-n.last_fire<(u32)refractory;if(r.fired&&r.mask&&!blocked){i64 cost=FIRE_STARTUP+FIRE_PER_LINE*__popcll(r.mask);if(n.mana>=cost){n.mana-=cost;n.last_fire=now;atomicAdd((unsigned long long*)&v.counters->fires,1ull);n.credit=(u16)min(65535,(int)n.credit+(int)(cost/16));int sl=((now+TRANSIT_MS)/SYS_MS)%TRANSIT_SLOTS;atomicAdd((unsigned long long*)&v.transit[n.lobe*TRANSIT_SLOTS+sl],(u64)cost);
-   int nl=LINES[n.kind];u32 ec=(id+1<v.n?v.neurons[id+1].edge_off:(u32)0); // overwritten below for final neuron
+   int nl=line_count(n.kind);u32 ec=(id+1<v.n?v.neurons[id+1].edge_off:(u32)0); // overwritten below for final neuron
    ec=(id==v.n-1)?0:ec-n.edge_off; // final neuron is a giant and has zero edges in this test
    for(u32 j=0;j<ec;j++){EdgeD e=v.edges[n.edge_off+j];int li=e.line%nl;if((r.mask>>li)&1){u32 slot=(now+e.delay)%SIGNAL_RING,at=atomicAdd(&v.signal_count[slot],1u);if(at<v.signal_cap){v.signal_ring[(size_t)slot*v.signal_cap+at]={e.dst,e.line,(u8)((r.bits>>li)&1),0};atomicAdd((unsigned long long*)&v.counters->signals,1ull);}else atomicAdd((unsigned long long*)&v.counters->dropped,1ull);}}
    if(n.is_mouth){int l0=nl-2,l1=nl-1;if(((r.mask>>l0)&1)||((r.mask>>l1)&1)){u32 at=atomicAdd(v.output_count,2u);if(at+1<v.output_cap){v.output_bits[at]=(r.bits>>l0)&1;v.output_bits[at+1]=(r.bits>>l1)&1;atomicAdd((unsigned long long*)&v.counters->mouth_bits,2ull);}}}n.in_bits=0;}}
@@ -178,7 +179,7 @@ template<class T> static T* gpu_copy(const std::vector<T>& h){T* p=nullptr;CUDA_
 template<class T> static T* gpu_zero(size_t n){T* p=nullptr;CUDA_OK(cudaMalloc((void**)&p,n*sizeof(T)));CUDA_OK(cudaMemset(p,0,n*sizeof(T)));return p;}
 
 int main(int argc,char**argv){int N=128000,limit=70,seconds=120,device=0,batch=100;u64 seed=12345;for(int i=1;i<argc;i++){std::string a=argv[i];auto val=[&](){return i+1<argc?argv[++i]:"0";};if(a=="--neurons")N=std::atoi(val());else if(a=="--gpu-limit")limit=std::atoi(val());else if(a=="--seconds")seconds=std::atoi(val());else if(a=="--device")device=std::atoi(val());else if(a=="--batch")batch=std::atoi(val());else if(a=="--seed")seed=std::strtoull(val(),nullptr,10);else if(a=="--help"){std::puts("smile-gpu [--neurons 128000] [--gpu-limit 70] [--seconds 120] [--device 0] [--batch 100]");return 0;}}
- N=std::max(1000,N);limit=std::max(10,std::min(100,limit));batch=std::max(10,std::min(1000,batch));CUDA_OK(cudaSetDevice(device));cudaDeviceProp prop{};CUDA_OK(cudaGetDeviceProperties(&prop,device));
+ N=std::max(1000,N);limit=std::max(10,std::min(70,limit));batch=std::max(10,std::min(1000,batch));CUDA_OK(cudaSetDevice(device));cudaDeviceProp prop{};CUDA_OK(cudaGetDeviceProperties(&prop,device));
  std::printf("\n  smile CUDA validation\n  GPU: %s | compute %d.%d | target ceiling %d%%\n",prop.name,prop.major,prop.minor,limit);std::printf("  IMPORTANT: 128k is fixed real work; utilization may stay below the ceiling.\n\n");
 
  // Programs.
@@ -186,10 +187,10 @@ int main(int argc,char**argv){int N=128000,limit=70,seconds=120,device=0,batch=1
  std::vector<u32> flat;u16 off[MAX_PROGRAMS]={},len[MAX_PROGRAMS]={};for(size_t i=0;i<programs.size();i++){off[i]=(u16)flat.size();len[i]=(u16)programs[i].size();flat.insert(flat.end(),programs[i].begin(),programs[i].end());}if(flat.size()>MAX_CODE){std::fprintf(stderr,"program table too large\n");return 2;}CUDA_OK(cudaMemcpyToSymbol(C_CODE,flat.data(),flat.size()*4));CUDA_OK(cudaMemcpyToSymbol(C_OFF,off,sizeof(off)));CUDA_OK(cudaMemcpyToSymbol(C_LEN,len,sizeof(len)));
 
  int nmem=std::max(1,(int)std::llround(N*.03)),ngiant=std::max(1,nmem/20),nnorm=N-nmem-ngiant;RngH rng(seed);std::vector<NeuronD> neurons(N);std::vector<u8> memory;memory.reserve((size_t)nnorm*32+(size_t)nmem*1024+(size_t)ngiant*4096);u64 capsum[3]={0,0,0};
- auto setup=[&](int id,int kind,int lobe,int prog){NeuronD& n=neurons[id];n.kind=kind;n.lobe=lobe;n.prog=prog;n.cap=CAP[kind];n.mana=n.cap/2;n.rng=rng.next();n.mem_off=(u32)memory.size();memory.resize(memory.size()+MEM_BYTES[kind]);n.next_eval=rng.below(CADENCE_MS[kind]+1);capsum[lobe]+=n.cap;};
+ auto setup=[&](int id,int kind,int lobe,int prog){NeuronD& n=neurons[id];n.kind=kind;n.lobe=lobe;n.prog=prog;n.cap=CAP[kind];n.mana=n.cap/2;n.rng=rng.next();n.mem_off=(u32)memory.size();memory.resize(memory.size()+memory_bytes(kind));n.next_eval=rng.below(cadence_ms(kind)+1);capsum[lobe]+=n.cap;};
  int id=0;for(int i=0;i<nnorm;i++,id++){double u=(double)i/std::max(1,nnorm);int l=u<.2?INPUT:(u<.8?CENTRAL:OUTPUT);setup(id,NORMAL,l,rng.below(6));}for(int i=0;i<nmem;i++,id++){double u=(double)i/std::max(1,nmem);int l=u<.15?INPUT:(u<.85?CENTRAL:OUTPUT);setup(id,MEMORY,l,6+rng.below(3));}for(int i=0;i<ngiant;i++,id++)setup(id,GIANT,CENTRAL,9);
  std::vector<int> mouths;for(int i=0;i<N;i++)if(neurons[i].lobe==OUTPUT&&neurons[i].kind!=GIANT)mouths.push_back(i);for(int k=0;k<MOUTH_COUNT&&!mouths.empty();k++){int j=rng.below((u32)mouths.size());neurons[mouths[j]].is_mouth=1;mouths.erase(mouths.begin()+j);}
- std::vector<EdgeD> edges;edges.reserve((size_t)nnorm*20+(size_t)nmem*40);for(int i=0;i<N;i++){neurons[i].edge_off=(u32)edges.size();int ec=neurons[i].kind==NORMAL?20:(neurons[i].kind==MEMORY?40:0);for(int e=0;e<ec;e++){u32 dst;do{dst=rng.below((u32)(N-ngiant));}while(dst==(u32)i);edges.push_back({dst,(u8)rng.below(LINES[neurons[dst].kind]),(u8)(1+rng.below(20)),0});}}
+ std::vector<EdgeD> edges;edges.reserve((size_t)nnorm*20+(size_t)nmem*40);for(int i=0;i<N;i++){neurons[i].edge_off=(u32)edges.size();int ec=neurons[i].kind==NORMAL?20:(neurons[i].kind==MEMORY?40:0);for(int e=0;e<ec;e++){u32 dst;do{dst=rng.below((u32)(N-ngiant));}while(dst==(u32)i);edges.push_back({dst,(u8)rng.below(line_count(neurons[dst].kind)),(u8)(1+rng.below(20)),0});}}
  // Sentinel edge offset makes per-neuron edge count available without another array.
  neurons.push_back(NeuronD{});neurons.back().edge_off=(u32)edges.size();
  std::vector<u32> inat((size_t)N*MAX_LINES,NEVER);std::vector<u64> hpools(3),htargets(3),hcaps(3);for(int l=0;l<3;l++){hcaps[l]=capsum[l];htargets[l]=capsum[l]*3/5;hpools[l]=htargets[l]/2;}
